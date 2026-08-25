@@ -138,6 +138,7 @@ pub fn ensure_example_sites() -> anyhow::Result<()> {
             limit_rate: None,
         }),
         archive: None,
+        dedup_stories_from_highlights: None,
         extractor,
         // Naming: posts/reels → post_id, stories/highlights inner → media_id, date %Y-%m-%d verified via gallery-dl -K
         // _num:02d preserves carrousel order (01,02,03) with _ separator (only for posts/reels, NOT highlights)
@@ -202,6 +203,7 @@ pub fn ensure_example_sites() -> anyhow::Result<()> {
 #     By default scrapmf keeps its own per-account download archive in
 #     ~/.config/scrapmf/archive/<site>/<account>.jsonl — dedup is automatic;
 #     disable with [general] archive = false or `scrapmf scrape --no-archive`.
+#   dedup_stories_from_highlights = true  # instagram only: if a story media_id already exists in highlights, skip it (requires archive)
 #   extra_args = ["--restrict-filenames", "auto", "--proxy", "http://..."]  # allow-list: --proxy, --user-agent, --sleep, --sleep-request, --sleep-429, --limit-rate, --cookies, --cookies-from-browser, --restrict-filenames, --destination, --get-urls (--exec forbidden; ;|&$><` rejected)
 #   filename_template = "{date:%Y-%m-%d}_{post_id}_{num:02d}.{extension}"  # → gallery-dl -o filename= (date first; _num:02d preserves carrousel order 01,02,03)
 #   directory_template = ["{scrapmf_root}", "{category}", "{username}", "{subcategory}"]  # → PERFIL/instagram/CUENTA/posts
@@ -219,7 +221,7 @@ pub fn ensure_example_sites() -> anyhow::Result<()> {
 
 "#;
     let content = format!("{header}{body}");
-    write_config_file(&target, &content, false)
+    write_config_file(&target, &content)
 }
 
 /// Ensure sites/tiktok.toml exists with 0o600 (no clobber).
@@ -328,6 +330,7 @@ pub fn ensure_tiktok_site() -> anyhow::Result<()> {
             limit_rate: None,
         }),
         archive: None,
+        dedup_stories_from_highlights: None,
         extractor,
         filename_template: None,
         directory_template: None,
@@ -381,7 +384,7 @@ pub fn ensure_tiktok_site() -> anyhow::Result<()> {
 
 "#;
     let content = format!("{header}{body}");
-    write_config_file(&target, &content, false)
+    write_config_file(&target, &content)
 }
 
 /// Ensure sites/twitter.toml exists with 0o600 (no clobber).
@@ -470,6 +473,7 @@ pub fn ensure_twitter_site() -> anyhow::Result<()> {
             limit_rate: None,
         }),
         archive: None,
+        dedup_stories_from_highlights: None,
         extractor,
         filename_template: None,
         directory_template: None,
@@ -495,7 +499,7 @@ pub fn ensure_twitter_site() -> anyhow::Result<()> {
 #
 "#;
     let content = format!("{header}{body}");
-    write_config_file(&target, &content, false)
+    write_config_file(&target, &content)
 }
 
 /// Ensure sites/vsco.toml exists with 0o600 (no clobber).
@@ -571,6 +575,7 @@ pub fn ensure_vsco_site() -> anyhow::Result<()> {
             limit_rate: None,
         }),
         archive: None,
+        dedup_stories_from_highlights: None,
         extractor,
         filename_template: None,
         directory_template: None,
@@ -593,7 +598,7 @@ pub fn ensure_vsco_site() -> anyhow::Result<()> {
 #
 "#;
     let content = format!("{header}{body}");
-    write_config_file(&target, &content, false)
+    write_config_file(&target, &content)
 }
 
 /// Serialize a profile to `path` with doc header and 0o600 perms.
@@ -604,5 +609,5 @@ pub fn write_profile_file(path: &Path, profile: &Profile) -> anyhow::Result<()> 
         profile.profile.as_deref().unwrap_or("profile")
     );
     let content = format!("{header}{body}\n");
-    write_config_file(path, &content, true)
+    write_config_file(path, &content)
 }

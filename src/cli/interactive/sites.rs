@@ -8,12 +8,10 @@ pub(super) fn configuration_submenu() {
     loop {
         clear_screen();
         let options = vec![
-            "Cookie profiles (cookies/*.txt)",
-            "Manage Sites (sites/*.toml) — $EDITOR",
-            "Manage Profiles (profiles/*.toml) — $EDITOR",
-            "General (output_dir)",
-            "Show config path",
-            "Edit config.toml ($EDITOR)",
+            "Cookie profiles",
+            "Manage Sites",
+            "Manage Profiles",
+            "General settings",
             "Back",
         ];
         let choice = match select_menu("What do you want to configure?", options).prompt() {
@@ -24,36 +22,20 @@ pub(super) fn configuration_submenu() {
             }
         };
         match choice {
-            "Cookie profiles (cookies/*.txt)" => {
+            "Cookie profiles" => {
                 cookie_profiles_menu();
                 clear_screen();
             }
-            "Manage Sites (sites/*.toml) — $EDITOR" => {
+            "Manage Sites" => {
                 manage_sites();
                 clear_screen();
             }
-            "Manage Profiles (profiles/*.toml) — $EDITOR" => {
+            "Manage Profiles" => {
                 manage_profiles();
                 clear_screen();
             }
-            "General (output_dir)" => {
-                if let Err(e) = crate::commands::config::run(None) {
-                    eprintln!("error: config failed: {e}");
-                }
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                clear_screen();
-            }
-            "Show config path" => {
-                if let Some(p) = crate::config::config_path() {
-                    println!("{}", p.display());
-                    std::thread::sleep(std::time::Duration::from_millis(1200));
-                }
-                clear_screen();
-            }
-            "Edit config.toml ($EDITOR)" => {
-                if let Some(p) = crate::config::config_path() {
-                    edit_with_editor(&p);
-                }
+            "General settings" => {
+                general_settings_menu();
                 clear_screen();
             }
             "Back" => {
@@ -64,6 +46,89 @@ pub(super) fn configuration_submenu() {
                 clear_screen();
                 return;
             }
+        }
+    }
+}
+
+fn general_settings_menu() {
+    loop {
+        clear_screen();
+        let cfg = crate::config::load().unwrap_or_default();
+        let cfg_path = crate::config::config_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let archive_label = if cfg.general.archive {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        let options: Vec<String> = vec![
+            format!("Output directory: {}", cfg.general.output_dir.display()),
+            format!("Download archive: {archive_label}"),
+            "Show config path".to_string(),
+            "Edit raw config.toml ($EDITOR)".to_string(),
+            "Back".to_string(),
+        ];
+        let choice = match select_menu("General settings", options).prompt() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        if choice.starts_with("Output directory:") {
+            let current = cfg.general.output_dir.display().to_string();
+            let Ok(new_val) = Text::new("Output directory:")
+                .with_default(&current)
+                .with_help_message("e.g. ~/scrapmf, ~/Pictures/scrapmf — tilde ~/ is expanded")
+                .prompt()
+            else {
+                continue;
+            };
+            let new_val = new_val.trim().to_string();
+            if new_val.is_empty() || new_val == current {
+                continue;
+            }
+            let new_path = std::path::PathBuf::from(&new_val);
+            if let Err(e) = crate::application::scraper::validate_output_path(&new_path) {
+                println!("✖ invalid path: {e}");
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                continue;
+            }
+            let mut new_cfg = cfg.clone();
+            new_cfg.general.output_dir = new_path;
+            match crate::config::save(&new_cfg) {
+                Ok(()) => println!("✔ saved → {cfg_path}"),
+                Err(e) => println!("✖ save failed: {e}"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+        } else if choice.starts_with("Download archive:") {
+            let new_val = !cfg.general.archive;
+            let label = if new_val { "enabled" } else { "disabled" };
+            let prompt = format!("Turn download archive {label}?");
+            let ok = Confirm::new(&prompt)
+                .with_default(true)
+                .with_render_config(super::theme::render_config())
+                .prompt()
+                .unwrap_or(false);
+            if !ok {
+                continue;
+            }
+            let mut new_cfg = cfg.clone();
+            new_cfg.general.archive = new_val;
+            match crate::config::save(&new_cfg) {
+                Ok(()) => println!("✔ archive {label} → {cfg_path}"),
+                Err(e) => println!("✖ save failed: {e}"),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+        } else if choice == "Show config path" {
+            println!("{cfg_path}");
+            let _ = Text::new("Press enter to continue").prompt();
+        } else if choice == "Edit raw config.toml ($EDITOR)" {
+            if let Some(p) = crate::config::config_path() {
+                // Ensure file exists before opening editor
+                let _ = crate::config::ensure_default_config();
+                edit_with_editor(&p);
+            }
+        } else {
+            return;
         }
     }
 }
@@ -148,147 +213,365 @@ fn cookie_profiles_menu() {
     use crate::config::cookies;
     loop {
         clear_screen();
-        let options: Vec<String> = cookies::list_profiles();
-        let rows: Vec<String> = options
+        let count = cookies::list_profiles().len();
+        let browse_label = if count == 0 {
+            "Browse profiles".to_string()
+        } else {
+            format!("Browse profiles ({count})")
+        };
+        let choices: Vec<String> = vec![
+            browse_label,
+            "Create profile — capture from browser".into(),
+            "Import profile — from file or paste".into(),
+            "Back".into(),
+        ];
+        let choice = match select_menu("Cookie profiles", choices).prompt() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        if choice.starts_with("Browse profiles") {
+            browse_profiles_menu();
+        } else if choice.starts_with("Create profile") {
+            create_profile_wizard();
+        } else if choice.starts_with("Import profile") {
+            import_profile_submenu();
+        } else {
+            return;
+        }
+    }
+}
+
+fn browse_profiles_menu() {
+    use crate::config::cookies;
+    loop {
+        let names = cookies::list_profiles();
+        if names.is_empty() {
+            println!("ℹ No profiles yet — use Create or Import first");
+            std::thread::sleep(std::time::Duration::from_millis(1200));
+            return;
+        }
+        let rows: Vec<String> = names
             .iter()
             .map(|name| match cookies::profile_summary(name) {
                 Ok(summary) => format!("{name}  — {summary}"),
                 Err(e) => format!("{name}  — ⚠ {e}"),
             })
             .collect();
-        let mut choices: Vec<String> = vec![
-            "Create profile".into(),
-            "Refresh profile (re-capture)".into(),
-            "Import from paste ($EDITOR)".into(),
+        let Ok(picked_row) = select_menu("Browse profiles — select one", rows).prompt() else {
+            return;
+        };
+        let name = picked_row.split("  — ").next().unwrap_or("").to_string();
+        if !name.is_empty() {
+            profile_detail_menu(&name);
+        }
+    }
+}
+
+fn profile_detail_menu(name: &str) {
+    use crate::config::cookies;
+    loop {
+        clear_screen();
+        // Header with current summary
+        let summary = match cookies::profile_summary(name) {
+            Ok(s) => s,
+            Err(e) => format!("⚠ {e}"),
+        };
+        let path = cookies::profile_path(name)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        println!("  ◆ {name}");
+        println!("    {summary}");
+        println!("    {path}");
+        println!();
+        let choices: Vec<String> = vec![
+            "View details".into(),
+            "Refresh — re-capture from browser".into(),
+            "Delete profile".into(),
+            "Back".into(),
         ];
-        choices.extend(rows);
-        choices.push("Delete a profile".into());
-        choices.push("Back".into());
-        let choice = match select_menu("Cookie profiles", choices).prompt() {
+        let choice = match select_menu(&format!("Profile: {name}"), choices).prompt() {
             Ok(c) => c,
             Err(_) => return,
         };
         match choice.as_str() {
-            "Create profile" => {
-                create_profile_wizard();
-            }
-            "Refresh profile (re-capture)" => {
-                let names = cookies::list_profiles();
-                if names.is_empty() {
-                    println!("ℹ No profiles yet — use Create profile first");
-                    std::thread::sleep(std::time::Duration::from_millis(1200));
-                    continue;
+            "View details" => {
+                clear_screen();
+                println!("  ◆ {name} — details");
+                println!("  ───────────────────────────────────────");
+                println!("  {summary}");
+                println!("  File: {path}");
+                if let Some(p) = cookies::profile_path(name)
+                    && let Ok(content) = std::fs::read_to_string(p)
+                {
+                    if let Some(meta) = cookies::parse_source_metadata(&content) {
+                        println!(
+                            "  Source: {} — networks: {}",
+                            meta.browser,
+                            meta.networks.join(", ")
+                        );
+                    } else {
+                        println!("  Source: manual import (no browser metadata)");
+                    }
                 }
-                // Los perfiles con cookies expiradas saltan a la vista
-                let rows: Vec<String> = names
-                    .iter()
-                    .map(|n| match cookies::profile_summary(n) {
-                        Ok(s) => format!("{n}  — {s}"),
-                        Err(e) => format!("{n}  — ⚠ {e}"),
-                    })
-                    .collect();
-                let Ok(picked_row) = select_menu("Refresh which profile?", rows).prompt() else {
-                    continue;
-                };
-                let name = picked_row.split("  — ").next().unwrap_or("").to_string();
-
+                let _ = Text::new("Press enter to continue").prompt();
+            }
+            "Refresh — re-capture from browser" => {
                 println!("→ Re-capturing '{name}'…");
-                let mut edited = false;
-                match cookies::refresh_profile(&name) {
+                match cookies::refresh_profile(name) {
                     Ok(cookies::Refresh::Done { path, count }) => {
                         println!("✔ refreshed {count} cookie(s) → {}", path.display());
                         println!("✔ accounts using this profile need no changes");
+                        let _ = Text::new("Press enter to continue").prompt();
                     }
                     Ok(cookies::Refresh::ManualImportRequired) => {
-                        // Importado a mano: refresco vía editor
-                        if let Some(p) = cookies::profile_path(&name) {
-                            edit_with_editor(&p);
-                            edited = true;
+                        println!(
+                            "ℹ This profile was imported manually — it has no browser to re-capture from."
+                        );
+                        println!(
+                            "  To refresh, re-export with 'Get cookies.txt LOCALLY' while logged in,"
+                        );
+                        println!("  then use Import profile → From file / Paste.");
+                        let go_import = Confirm::new("Open Import menu now?")
+                            .with_default(false)
+                            .with_render_config(super::theme::render_config())
+                            .prompt()
+                            .unwrap_or(false);
+                        if go_import {
+                            import_profile_submenu_prefilled(name);
+                        } else {
+                            let _ = Text::new("Press enter to continue").prompt();
                         }
                     }
                     Err(e) => {
                         println!("✖ refresh failed: {e}");
                         println!(
-                            "  tip: re-create it with Create profile, or paste \
-                                  a fresh export via the import option"
+                            "  tip: is the browser closed? Try again, or re-create with Create profile"
                         );
+                        let _ = Text::new("Press enter to continue").prompt();
                     }
                 }
-                if !edited {
-                    let _ = Text::new("Press enter to continue").prompt();
-                }
-                clear_screen();
-                continue;
             }
-            "Import from paste ($EDITOR)" => {
-                let Some(name) = ask_nonempty("Profile name:") else {
-                    return;
-                };
-                let path = match cookies::profile_path(&name) {
-                    Some(p) => p,
-                    None => return,
-                };
-                let template = "# Netscape HTTP Cookie File\n# Paste your exported cookies below.\n# Get them with the 'Get cookies.txt LOCALLY' extension while logged in.\n\n";
-                std::fs::write(&path, template).ok();
-                edit_with_editor(&path);
-                match cookies::load_profile(&name) {
-                    Ok(list) => println!("✔ saved {} cookie(s)", list.len()),
-                    Err(e) => println!("✖ invalid profile ({e}) — delete or fix {path:?}"),
-                }
-                std::thread::sleep(std::time::Duration::from_millis(1800));
-            }
-            "Delete a profile" => {
-                let names = cookies::list_profiles();
-                if names.is_empty() {
-                    println!("ℹ no profiles");
-                    continue;
-                }
-                let target = select_menu("Delete which profile?", names).prompt();
-                if let Ok(target) = target {
-                    match cookies::delete_profile(&target) {
-                        Ok(true) => println!("✔ deleted"),
-                        _ => println!("✖ not found"),
+            "Delete profile" => {
+                let ok = Confirm::new(&format!("Delete profile '{name}'?"))
+                    .with_default(false)
+                    .with_render_config(super::theme::render_config())
+                    .prompt()
+                    .unwrap_or(false);
+                if ok {
+                    match cookies::delete_profile(name) {
+                        Ok(true) => {
+                            println!("✔ deleted");
+                            std::thread::sleep(std::time::Duration::from_millis(800));
+                            return;
+                        }
+                        _ => {
+                            println!("✖ not found");
+                            std::thread::sleep(std::time::Duration::from_millis(800));
+                        }
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(800));
             }
-            "Back" => return,
-            _ => {}
+            _ => return,
         }
     }
 }
 
-pub(super) fn site_submenu(name: &str, dir: &Path) {
-    let path = dir.join(format!("{name}.toml"));
+fn import_profile_submenu() {
+    import_profile_submenu_prefilled("")
+}
+
+fn import_profile_submenu_prefilled(default_name: &str) {
     loop {
         clear_screen();
-        let options = vec!["Edit", "Delete site", "Back"];
+        let choices: Vec<String> = vec![
+            "Import from file — select cookies.txt".into(),
+            "Import from paste — open $EDITOR".into(),
+            "Back".into(),
+        ];
+        let choice = match select_menu("Import profile", choices).prompt() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        match choice.as_str() {
+            "Import from file — select cookies.txt" => {
+                import_from_file_flow(default_name);
+            }
+            "Import from paste — open $EDITOR" => {
+                import_from_paste_flow(default_name);
+            }
+            _ => return,
+        }
+    }
+}
+
+fn import_from_file_flow(default_name: &str) {
+    use crate::config::cookies;
+    let Some(name) = (if default_name.is_empty() {
+        ask_nonempty("Profile name:")
+    } else {
+        let input = Text::new("Profile name:")
+            .with_default(default_name)
+            .prompt()
+            .ok()
+            .map(|s| s.trim().to_string());
+        input.filter(|s| !s.is_empty())
+    }) else {
+        return;
+    };
+    let Some(src) = Text::new("Path to cookies.txt file:")
+        .with_help_message("e.g. /tmp/cookies.txt or ~/Downloads/cookies.txt")
+        .prompt()
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    let src_path = Path::new(&src);
+    let src_expanded = if let Some(stripped) = src.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            home.join(stripped)
+        } else {
+            src_path.to_path_buf()
+        }
+    } else {
+        src_path.to_path_buf()
+    };
+    let content = match std::fs::read_to_string(&src_expanded) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("✖ cannot read {}: {e}", src_expanded.display());
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            return;
+        }
+    };
+    match cookies::save_profile(&name, &content) {
+        Ok(path) => {
+            let count = cookies::load_profile(&name).map(|v| v.len()).unwrap_or(0);
+            println!("✔ imported {count} cookie(s) → {}", path.display());
+        }
+        Err(e) => {
+            println!("✖ invalid cookies file: {e}");
+            println!("  Expected Netscape format (7 tab-separated fields).");
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1800));
+}
+
+fn import_from_paste_flow(default_name: &str) {
+    use crate::config::cookies;
+    let Some(name) = (if default_name.is_empty() {
+        ask_nonempty("Profile name:")
+    } else {
+        let input = Text::new("Profile name:")
+            .with_default(default_name)
+            .prompt()
+            .ok()
+            .map(|s| s.trim().to_string());
+        input.filter(|s| !s.is_empty())
+    }) else {
+        return;
+    };
+    let path = match cookies::profile_path(&name) {
+        Some(p) => p,
+        None => return,
+    };
+    let template = "# Netscape HTTP Cookie File\n# Paste your exported cookies below.\n# Get them with the 'Get cookies.txt LOCALLY' extension while logged in.\n# 1. Install the extension in your browser\n# 2. Log in to the site (instagram.com, tiktok.com, etc.)\n# 3. Click the extension → Export → Copy\n# 4. Paste below this header, save and close the editor.\n\n";
+    // Only write template if file doesn't exist, to avoid overwriting existing profile
+    if !path.exists() {
+        let _ = std::fs::write(&path, template);
+    } else {
+        // Ensure header exists for guidance
+        if let Ok(existing) = std::fs::read_to_string(&path)
+            && !existing.contains("Netscape HTTP Cookie File")
+        {
+            let _ = std::fs::write(&path, format!("{template}{existing}"));
+        }
+    }
+    edit_with_editor(&path);
+    match cookies::load_profile(&name) {
+        Ok(list) => println!("✔ saved {} cookie(s)", list.len()),
+        Err(e) => println!("✖ invalid profile ({e}) — delete or fix {path:?}"),
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1800));
+}
+
+pub(super) fn site_submenu(name: &str, dir: &Path) {
+    let path = dir.join(format!("{name}.toml"));
+    let is_instagram = name == "instagram";
+    loop {
+        clear_screen();
+        let mut options: Vec<String> = vec!["Edit".to_string()];
+        if is_instagram {
+            let enabled = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| toml::from_str::<crate::config::Site>(&s).ok())
+                .and_then(|site| site.dedup_stories_from_highlights)
+                .unwrap_or(false);
+            let label = if enabled {
+                "Dedup stories from highlights: enabled"
+            } else {
+                "Dedup stories from highlights: disabled"
+            };
+            options.push(label.to_string());
+        }
+        options.push("Delete site".to_string());
+        options.push("Back".to_string());
         let choice = match select_menu(&format!("Site: {name}"), options).prompt() {
             Ok(c) => c,
             Err(_) => return,
         };
-        match choice {
-            "Edit" => {
-                if path.exists() {
-                    edit_with_editor(&path);
-                } else {
-                    eprintln!("error: {name}.toml no longer exists");
-                    return;
-                }
+        if choice == "Edit" {
+            if path.exists() {
+                edit_with_editor(&path);
+            } else {
+                eprintln!("error: {name}.toml no longer exists");
+                return;
             }
-            "Delete site" => {
-                if Confirm::new(&format!("Delete {name}.toml?"))
-                    .with_render_config(render_config())
-                    .with_default(false)
-                    .prompt()
-                    .unwrap_or(false)
-                {
-                    let _ = std::fs::remove_file(&path);
-                    println!("✔ Deleted {name}");
-                    return;
-                }
+        } else if choice.starts_with("Dedup stories from highlights:") {
+            let current = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| toml::from_str::<crate::config::Site>(&s).ok())
+                .and_then(|site| site.dedup_stories_from_highlights)
+                .unwrap_or(false);
+            let new_val = !current;
+            match std::fs::read_to_string(&path) {
+                Ok(raw) => match toml::from_str::<crate::config::Site>(&raw) {
+                    Ok(mut site) => {
+                        site.dedup_stories_from_highlights = Some(new_val);
+                        match toml::to_string_pretty(&site) {
+                            Ok(body) => {
+                                let header = "# scrapmf — site config — instagram\n# dedup_stories_from_highlights: when true, stories already saved in highlights (same media_id) are skipped via archive\n\n";
+                                let content = format!("{header}{body}\n");
+                                match crate::config::fs::write_config_file(&path, &content) {
+                                    Ok(()) => println!(
+                                        "✔ dedup stories from highlights {}",
+                                        if new_val { "enabled" } else { "disabled" }
+                                    ),
+                                    Err(e) => println!("✖ save failed: {e}"),
+                                }
+                            }
+                            Err(e) => println!("✖ serialize failed: {e}"),
+                        }
+                    }
+                    Err(e) => println!("✖ parse failed: {e}"),
+                },
+                Err(e) => println!("✖ read failed: {e}"),
             }
-            _ => return,
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+        } else if choice == "Delete site" {
+            if Confirm::new(&format!("Delete {name}.toml?"))
+                .with_render_config(render_config())
+                .with_default(false)
+                .prompt()
+                .unwrap_or(false)
+            {
+                let _ = std::fs::remove_file(&path);
+                println!("✔ Deleted {name}");
+                return;
+            }
+        } else {
+            return;
         }
     }
 }

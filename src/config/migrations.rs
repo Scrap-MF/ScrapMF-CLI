@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::Context;
 
-use super::fs::{backup_before_write, write_config_file};
+use super::fs::write_config_file;
 use super::templates::tiktok_posts_conditional_directory;
 use super::{RateLimit, Site, sites_dir};
 
@@ -189,7 +189,6 @@ pub(super) fn migrate_highlights_if_needed(path: &Path) -> anyhow::Result<bool> 
     if !needs {
         return Ok(false);
     }
-    // Backup happens in write_config_file below
     tracing::warn!(path = %path.display(), "migrating instagram highlights to new rule (no date, highlight_id, media_id only)");
 
     // Parse and rebuild with corrected highlights table, preserving other fields
@@ -293,12 +292,12 @@ pub(super) fn migrate_highlights_if_needed(path: &Path) -> anyhow::Result<bool> 
 # Stories: .../stories/{year}/{month-lowercase}/{post_id}_{num}.{ext} — ephemeral 24h
 # Posts/Reels: .../posts|reels/{post_id}_{date:%Y-%m-%d}_{num:02d}.{ext}
 # {scrapmf_root} injected at runtime via extractor.keywords (profile name; fallback "default")
-# Backup of previous version saved as *.bak.<timestamp>
+# Migrated from previous version
 # See header in newly created sites/instagram.toml for full docs
 
 "#;
     let content = format!("{header}{body}");
-    write_config_file(path, &content, true)?;
+    write_config_file(path, &content)?;
     Ok(true)
 }
 
@@ -452,13 +451,12 @@ pub(super) fn migrate_site_root_order(path: &Path) -> anyhow::Result<bool> {
     if !changed {
         return Ok(false);
     }
-    // Backup happens in write_config_file below
     tracing::warn!(path = %path.display(), "migrating site directories to scrapmf_root-first order");
 
     let body = toml::to_string_pretty(&site).context("serialize migrated site")?;
-    let header = "# scrapmf — site config — MIGRATED to profile/network/account/content structure\n# Directory arrays now start with {scrapmf_root} (injected at runtime via extractor.keywords)\n# Backup of previous version saved as *.bak.<timestamp>\n\n";
+    let header = "# scrapmf — site config — MIGRATED to profile/network/account/content structure\n# Directory arrays now start with {scrapmf_root} (injected at runtime via extractor.keywords)\n# Migrated from previous version\n\n";
     let content = format!("{header}{body}\n");
-    write_config_file(path, &content, true)?;
+    write_config_file(path, &content)?;
     Ok(true)
 }
 
@@ -537,9 +535,9 @@ pub fn migrate_filename_date_first(path: &Path) -> anyhow::Result<bool> {
         "migrating filenames to date-first order (alphabetical == chronological)"
     );
     let body = toml::to_string_pretty(&site).context("serialize migrated site")?;
-    let header = "# scrapmf — site config — MIGRATED to date-first filenames\n# Posts/reels/videos/photos now start with {date} so alphabetical order equals\n# chronological order. Already-downloaded files with the old name are re-fetched\n# once under the new name (gallery-dl never overwrites; existence is checked by\n# computed path, not parsed filenames).\n# Backup of previous version saved as *.bak.<timestamp>\n\n";
+    let header = "# scrapmf — site config — MIGRATED to date-first filenames\n# Posts/reels/videos/photos now start with {date} so alphabetical order equals\n# chronological order. Already-downloaded files with the old name are re-fetched\n# once under the new name (gallery-dl never overwrites; existence is checked by\n# computed path, not parsed filenames).\n# Migrated from previous version\n\n";
     let content = format!("{header}{body}\n");
-    write_config_file(path, &content, true)?;
+    write_config_file(path, &content)?;
     Ok(true)
 }
 
@@ -632,9 +630,9 @@ pub(super) fn migrate_tiktok_robustness(path: &Path) -> anyhow::Result<()> {
     }
 
     let body = toml::to_string_pretty(&site).context("serialize migrated tiktok site")?;
-    let header = "# scrapmf — site config — tiktok — MIGRATED\n# Added: --retries 10, --http-timeout 120 (large MP4s from an expiring CDN truncate\n# with gallery-dl defaults of 4 retries / 30s timeout).\n# FALLBACK WARNING: do not enable -o ytdl=true for TikTok — yt-dlp cannot download\n# photo carousels (saves only the background audio) and every slideshow would be lost.\n# Backup of previous version saved as *.bak.<timestamp>\n\n";
+    let header = "# scrapmf — site config — tiktok — MIGRATED\n# Added: --retries 10, --http-timeout 120 (large MP4s from an expiring CDN truncate\n# with gallery-dl defaults of 4 retries / 30s timeout).\n# FALLBACK WARNING: do not enable -o ytdl=true for TikTok — yt-dlp cannot download\n# photo carousels (saves only the background audio) and every slideshow would be lost.\n# Migrated from previous version\n\n";
     let content = format!("{header}{body}\n");
-    write_config_file(path, &content, true)?;
+    write_config_file(path, &content)?;
     tracing::info!(
         path = %path.display(),
         "tiktok.toml migrated with --retries 10 --http-timeout 120"
@@ -642,10 +640,142 @@ pub(super) fn migrate_tiktok_robustness(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// One-time migration: `config.toml` historically could contain inline
+/// `[sites.*]`, `[presets.*]` and `[profiles.*]` tables. The canonical
+/// layout is `sites/*.toml` / `profiles/*.toml` (+ legacy `presets/`).
+/// This migrates any inline tables into separate files (without
+/// overwriting existing ones) and rewrites `config.toml` to contain only
+/// `[general]` (+ `[backend]` if set). Idempotent.
+pub fn migrate_inline_config_to_files() -> anyhow::Result<usize> {
+    let Some(cfg_path) = super::config_path() else {
+        return Ok(0);
+    };
+    if !cfg_path.is_file() {
+        return Ok(0);
+    }
+    let raw = match std::fs::read_to_string(&cfg_path) {
+        Ok(s) => s,
+        Err(_) => return Ok(0),
+    };
+    // Fast path: no inline tables present
+    if !raw.contains("[sites.") && !raw.contains("[presets.") && !raw.contains("[profiles.") {
+        return Ok(0);
+    }
+    let cfg: super::Config = match toml::from_str(&raw) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(path = %cfg_path.display(), error = %e, "inline config unparseable — skipping inline→files migration");
+            return Ok(0);
+        }
+    };
+    if cfg.sites.is_empty() && cfg.presets.is_empty() && cfg.profiles.is_empty() {
+        return Ok(0);
+    }
+    let mut migrated = 0usize;
+
+    // Sites → sites/*.toml
+    if !cfg.sites.is_empty()
+        && let Some(dir) = super::sites_dir()
+    {
+        let _ = std::fs::create_dir_all(&dir);
+        for (name, site) in &cfg.sites {
+            let dest = dir.join(format!("{name}.toml"));
+            if dest.exists() {
+                continue;
+            }
+            let body = match toml::to_string_pretty(site) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(name = %name, error = %e, "could not serialize site for migration");
+                    continue;
+                }
+            };
+            let header = format!(
+                "# scrapmf — site config — migrated from config.toml\n# File: ~/.config/scrapmf/sites/{name}.toml (0o600, dir 0o700)\n\n"
+            );
+            let content = format!("{header}{body}\n");
+            if super::fs::write_config_file(&dest, &content).is_ok() {
+                // Ensure dir perms
+                super::fs::restrict_perms(&dir, true);
+                migrated += 1;
+                tracing::info!(path = %dest.display(), "migrated inline site to separate file");
+            }
+        }
+    }
+    // Presets → presets/*.toml (legacy, but conserve)
+    if !cfg.presets.is_empty()
+        && let Some(dir) = super::presets_dir()
+    {
+        let _ = std::fs::create_dir_all(&dir);
+        for (name, preset) in &cfg.presets {
+            let dest = dir.join(format!("{name}.toml"));
+            if dest.exists() {
+                continue;
+            }
+            if let Ok(body) = toml::to_string_pretty(preset) {
+                let header = format!(
+                    "# scrapmf — preset — migrated from config.toml\n# File: ~/.config/scrapmf/presets/{name}.toml\n\n"
+                );
+                let content = format!("{header}{body}\n");
+                if super::fs::write_config_file(&dest, &content).is_ok() {
+                    migrated += 1;
+                }
+            }
+        }
+    }
+    // Profiles → profiles/*.toml
+    if !cfg.profiles.is_empty()
+        && let Some(dir) = super::profiles_dir()
+    {
+        let _ = std::fs::create_dir_all(&dir);
+        for (name, profile) in &cfg.profiles {
+            let dest = dir.join(format!("{name}.toml"));
+            if dest.exists() {
+                continue;
+            }
+            if let Ok(body) = toml::to_string_pretty(profile) {
+                let header = format!(
+                    "# scrapmf — profile — migrated from config.toml\n# File: ~/.config/scrapmf/profiles/{name}.toml\n\n"
+                );
+                let content = format!("{header}{body}\n");
+                if super::fs::write_config_file(&dest, &content).is_ok() {
+                    migrated += 1;
+                }
+            }
+        }
+    }
+
+    if migrated == 0 {
+        return Ok(0);
+    }
+
+    // Rewrite config.toml with only general + backend (sites/presets/profiles are now skip_serializing)
+    let cleaned = super::Config {
+        general: cfg.general.clone(),
+        backend: cfg.backend.clone(),
+        ..Default::default()
+    };
+    let body = toml::to_string_pretty(&cleaned).context("serialize cleaned config")?;
+    let header = r#"# scrapmf — main config
+# XDG: ~/.config/scrapmf/config.toml (0o600, dir 0o700)
+# This file is the global defaults. Site and profile files override it.
+#
+# [general]
+#   output_dir = "~/scrapmf"                    # base output dir (HOME/scrapmf; CLI --output overrides; tilde ~/ expanded)
+#   archive = true                              # download archive (dedup per-account)
+# See: sites/*.toml for per-site options
+
+"#;
+    let content = format!("{header}{body}");
+    super::fs::write_config_file(&cfg_path, &content)?;
+    tracing::info!(migrated, path = %cfg_path.display(), "migrated inline config to separate files and cleaned config.toml");
+    Ok(migrated)
+}
+
 /// One-time content migration: user site/profile TOMLs written before the
 /// scrapmf rename reference `{scarpmf_root}` in their directory templates;
-/// the binary now injects `scrapmf_root`. Rewrites affected files with a
-/// pre-write `.bak` backup. Returns the number of files updated.
+/// the binary now injects `scrapmf_root`. Rewrites affected files.
+/// Returns the number of files updated.
 pub fn migrate_legacy_placeholders() -> anyhow::Result<usize> {
     let mut count = 0usize;
     for dir in [super::sites_dir(), super::profiles_dir()]
@@ -666,8 +796,7 @@ pub fn migrate_legacy_placeholders() -> anyhow::Result<usize> {
                     continue;
                 }
                 let new = raw.replace("{scarpmf_root}", "{scrapmf_root}");
-                backup_before_write(&path);
-                match write_config_file(&path, &new, false) {
+                match write_config_file(&path, &new) {
                     Ok(()) => count += 1,
                     Err(e) => {
                         tracing::warn!(path = %path.display(), error = %e, "placeholder migration failed")
