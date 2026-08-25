@@ -84,7 +84,28 @@ paru -S scrapmf-bin   # prebuilt static binary
 paru -S scrapmf       # build from source
 ```
 
-**Windows:** download `scrapmf-x86_64-pc-windows-msvc.tar.gz` from the [releases page](https://github.com/Scrap-MF/ScrapMF-CLI/releases) and extract `scrapmf.exe` anywhere in your `PATH`.
+**Windows:**
+
+```powershell
+# 1. Download from https://github.com/Scrap-MF/ScrapMF-CLI/releases
+#    → scrapmf-x86_64-pc-windows-msvc.tar.gz
+tar -xf scrapmf-x86_64-pc-windows-msvc.tar.gz      # tar is built into Windows 10+
+
+# 2. Put scrapmf.exe somewhere in PATH (per-user folder works fine)
+mkdir "$env:USERPROFILE\bin" -Force
+Move-Item .\scrapmf.exe "$env:USERPROFILE\bin\"
+[Environment]::SetEnvironmentVariable(
+  "Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";$env:USERPROFILE\bin", "User")
+
+# 3. New terminal, then:
+scrapmf --version
+scrapmf setup       # downloads the official gallery-dl.exe + SHA256 verification
+```
+
+Notes:
+- Use **Windows Terminal** for the interactive TUI (legacy conhost renders poorly).
+- Config lives in `%APPDATA%\scrapmf\`, output defaults to `~\scrapmf`.
+- `--cookies-from-browser chrome|edge|brave|firefox` works with desktop browsers.
 
 <details>
 <summary><strong>Termux (Android)</strong></summary>
