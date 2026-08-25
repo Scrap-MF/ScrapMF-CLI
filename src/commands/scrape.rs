@@ -20,6 +20,7 @@ pub fn run(
     cookies_from_browser: Option<String>,
     dry_run: bool,
     no_archive: bool,
+    profile_pic_only: bool,
     verbose: u8,
 ) -> Result<()> {
     let _ = verbose;
@@ -121,6 +122,7 @@ pub fn run(
         profile_name: None,
         extra_extractor_opts: Vec::new(),
         no_archive,
+        profile_pic_only,
     };
 
     // 5. Provider args (gallery-dl is the only backend)

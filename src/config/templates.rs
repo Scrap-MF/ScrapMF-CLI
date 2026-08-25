@@ -601,6 +601,73 @@ pub fn ensure_vsco_site() -> anyhow::Result<()> {
     write_config_file(&target, &content)
 }
 
+/// Ensure sites/threads.toml exists with 0o600 (no clobber).
+/// Threads strategy — via `threadstractor` (gallery-dl has no Threads support).
+/// Naming mirrors instagram: date first for chronological order, but configurable
+/// via `filename_template` like gallery-dl (user can reorder to {post_id}_{date}...).
+pub fn ensure_threads_site() -> anyhow::Result<()> {
+    let Some(dir) = sites_dir() else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    crate::config::fs::restrict_perms(&dir, true);
+    let target = dir.join("threads.toml");
+    if target.exists() {
+        return Ok(());
+    }
+    let site = Site {
+        site: Some("threads".to_string()),
+        pattern: Some("threads.com".to_string()),
+        patterns: vec!["threads.com".to_string(), "threads.net".to_string()],
+        output_dir: None,
+        extra_args: vec!["--restrict-filenames".to_string(), "auto".to_string()],
+        cookies: None,
+        cookies_from_browser: Some("brave".to_string()),
+        cookie_profile: None,
+        rate_limit: Some(RateLimit {
+            sleep: Some("3-6".to_string()),
+            sleep_request: Some("8-15".to_string()),
+            sleep_429: Some(120),
+            limit_rate: None,
+        }),
+        archive: None,
+        dedup_stories_from_highlights: None,
+        extractor: std::collections::HashMap::new(),
+        // Default chronological: date first (like instagram) — user can override
+        // to "{post_id}_{num:02d}.{extension}" or "{post_id}_{date:%Y-%m-%d}_{num:02d}..."
+        // via sites/threads.toml: filename_template = "..."
+        filename_template: Some("{date:%Y-%m-%d}_{post_id}_{num:02d}.{extension}".to_string()),
+        directory_template: Some(vec![
+            "{scrapmf_root}".to_string(),
+            "{category}".to_string(),
+            "{username}".to_string(),
+            "{subcategory}".to_string(),
+        ]),
+    };
+    let body = toml::to_string_pretty(&site).context("serialize threads site")?;
+    let header = r#"# scrapmf — site config — threads (via threadstractor)
+# File: ~/.config/scrapmf/sites/threads.toml (0o600, dir 0o700)
+# Gallery-dl has no Threads support — scrapmf routes Threads URLs to the
+# `threadstractor` provider (pip install threadstractor).
+#
+# Threads strategy (via threadstractor, verified 2025-08 with Brave cookies):
+#   PERFIL/  (scrapmf_root = profile name; output default ~/scrapmf)
+#   └── threads/
+#       └── CUENTA/  ({username} handle)
+#           ├── posts/    → {date:%Y-%m-%d}_{post_id}_{num:02d}.{ext}  (DATE first so alphabetical == chronological; _num:02d for carrousel 01,02,03)
+#           └── profile/  → {username}_{media_id}.{ext}  (avatar; media_id changes per avatar version)
+#   Variables (same as instagram for compat): {date:%Y-%m-%d}, {post_id}, {media_id} (=post_id_1), {num:02d}, {username}, {category}=threads, {subcategory}=posts/profile, {extension}
+#   Chronological order: keep date first. To mimic gallery-dl reordering, edit filename_template:
+#     filename_template = "{post_id}_{date:%Y-%m-%d}_{num:02d}.{extension}"  # post_id first
+#     filename_template = "{post_id}_{num:02d}.{extension}"                  # no date, post_id only
+#   Directory is also configurable: directory_template = ["{scrapmf_root}","{category}","{username}"]
+#   Archive: deferred — threads archive JSONL not yet implemented (re-run skips via filename dedup for now).
+#
+"#;
+    let content = format!("{header}{body}");
+    write_config_file(&target, &content)
+}
+
 /// Serialize a profile to `path` with doc header and 0o600 perms.
 pub fn write_profile_file(path: &Path, profile: &Profile) -> anyhow::Result<()> {
     let body = toml::to_string_pretty(profile).context("serialize profile")?;

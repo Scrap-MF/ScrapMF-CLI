@@ -123,6 +123,14 @@ pub(super) fn preview_and_execute(
                         let rl = runlog.clone();
                         move |line: &str| {
                             rl.borrow_mut().line(line);
+                            // Hide noisy threadstractor header lines from dashboard (keep in runlog)
+                            if line.contains("cookies-from-browser=")
+                                || line.contains("threadstractor @")
+                                || line.contains("rate_limit=")
+                                || line.trim() == "posts"
+                            {
+                                return;
+                            }
                             st.lock().unwrap_or_else(|p| p.into_inner()).push_log(line);
                         }
                     }),
@@ -713,6 +721,63 @@ pub(super) fn prompt_quick_scrape() {
         }
         preview_and_execute(jobs, &cfg);
         return;
+    }
+
+    // Threads: fotos/videos (posts) and profile pic are separate — profile needs --profile-pic-only
+    if site_name == "threads" {
+        use crate::cli::interactive::content::ContentKind;
+        let has_posts = kinds.contains(&ContentKind::Posts);
+        let has_profile = kinds.contains(&ContentKind::Profile);
+        // If user selected All (both), create two jobs
+        if has_posts || has_profile {
+            let mut jobs = Vec::new();
+            if has_posts {
+                let req_posts = base_req(
+                    directory_template.clone(),
+                    Vec::new(),
+                    extra_urls.clone(),
+                    username.clone(),
+                );
+                jobs.push((
+                    req_posts,
+                    site_name.clone(),
+                    format!("{username} (posts)"),
+                    "posts".to_string(),
+                ));
+            }
+            if has_profile {
+                // Profile pic uses its own directory (profile) and flag — flattened like posts
+                let profile_dirs = flatten_quick_dirs(
+                    vec![
+                        "{scrapmf_root}".to_string(),
+                        "{category}".to_string(),
+                        "{username}".to_string(),
+                        "profile".to_string(),
+                    ],
+                    &username,
+                );
+                let mut req_profile =
+                    base_req(Some(profile_dirs), Vec::new(), Vec::new(), username.clone());
+                req_profile.profile_pic_only = true;
+                jobs.push((
+                    req_profile,
+                    site_name.clone(),
+                    format!("{username} (profile)"),
+                    "profile".to_string(),
+                ));
+            }
+            // Per-run cookie override
+            if std::io::IsTerminal::is_terminal(&std::io::stdout())
+                && let Some(file) = prompt_cookie_override()
+            {
+                for (req, ..) in jobs.iter_mut() {
+                    req.cookies_file = Some(file.clone());
+                    req.cookies_from_browser = None;
+                }
+            }
+            preview_and_execute(jobs, &cfg);
+            return;
+        }
     }
 
     let req = base_req(directory_template, Vec::new(), extra_urls, username.clone());

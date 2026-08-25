@@ -1,5 +1,6 @@
 pub mod browser;
 pub mod gallery_dl;
+pub mod threadstractor;
 
 use std::ffi::OsString;
 

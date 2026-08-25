@@ -2,7 +2,7 @@ pub mod cookies;
 pub mod model;
 
 pub(crate) use fs::restrict_perms;
-pub use model::{Account, Config, Preset, Profile, RateLimit, Site};
+pub use model::{Account, Config, General, Preset, Profile, RateLimit, Site};
 
 use std::path::{Path, PathBuf};
 
@@ -17,8 +17,8 @@ pub use migrations::{
     migrate_legacy_placeholders,
 };
 pub use templates::{
-    ensure_example_sites, ensure_tiktok_site, ensure_twitter_site, ensure_vsco_site,
-    write_profile_file,
+    ensure_example_sites, ensure_threads_site, ensure_tiktok_site, ensure_twitter_site,
+    ensure_vsco_site, write_profile_file,
 };
 
 fn expand_tilde(path: &Path) -> PathBuf {
@@ -294,22 +294,49 @@ pub fn ensure_default_config() -> anyhow::Result<()> {
         return Ok(());
     };
     if path.exists() {
-        // Migrate old default output_dir = "~" to "~/scrapmf"
+        // Migrate old default output_dir that resolves to $HOME (e.g. "~", "~/", "/home/sebas")
+        // to "~/scrapmf" — writing directly to $HOME would pollute it.
         if let Ok(s) = std::fs::read_to_string(&path)
-            && s.contains("output_dir = \"~\"")
-            && !s.contains("output_dir = \"~/scrapmf\"")
+            && let Ok(cfg) = toml::from_str::<crate::config::Config>(&s)
         {
-            let new = s.replace("output_dir = \"~\"", "output_dir = \"~/scrapmf\"");
-            match write_config_file(&path, &new) {
-                Ok(()) => tracing::info!(
-                    path = %path.display(),
-                    "migrated output_dir \"~\" -> \"~/scrapmf\""
-                ),
-                Err(e) => tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "could not migrate default output_dir"
-                ),
+            let expanded = expand_tilde(&cfg.general.output_dir);
+            if let Some(home) = dirs::home_dir()
+                && (expanded == home
+                    || s.contains("output_dir = \"~\"")
+                        && !s.contains("output_dir = \"~/scrapmf\""))
+            {
+                let new_cfg = Config {
+                    general: General {
+                        output_dir: std::path::PathBuf::from("~/scrapmf"),
+                        archive: cfg.general.archive,
+                    },
+                    backend: cfg.backend.clone(),
+                    ..Default::default()
+                };
+                if let Ok(body) = toml::to_string_pretty(&new_cfg) {
+                    let header = r#"# scrapmf — main config
+# XDG: ~/.config/scrapmf/config.toml (0o600, dir 0o700)
+# This file is the global defaults. Site and profile files override it.
+#
+# [general]
+#   output_dir = "~/scrapmf"                    # base output dir (HOME/scrapmf; CLI --output overrides; tilde ~/ expanded)
+#   archive = true                              # download archive (dedup per-account)
+# See: sites/*.toml for per-site options
+
+"#;
+                    let content = format!("{header}{body}");
+                    match write_config_file(&path, &content) {
+                        Ok(()) => tracing::info!(
+                            path = %path.display(),
+                            "migrated output_dir that resolved to $HOME -> \"~/scrapmf\""
+                        ),
+                        Err(e) => tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "could not migrate output_dir"
+                        ),
+                    }
+                }
             }
         }
         return Ok(());
