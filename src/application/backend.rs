@@ -17,7 +17,25 @@ use std::path::{Path, PathBuf};
 /// 3. Cut a new scrapmf release — users get the new pin via `scrapmf setup`.
 pub const GALLERY_DL_PIN: &str = "1.32.9";
 
+/// Legacy constant kept for callers that reference the Linux asset directly.
 pub const GALLERY_DL_ASSET: &str = "gallery-dl.bin";
+
+/// The standalone gallery-dl asset for the current OS, as published on the
+/// pinned Codeberg release. Upstream ships `gallery-dl.bin` (Linux) and
+/// `gallery-dl.exe` (Windows); there is no standalone build for macOS.
+pub fn gallery_dl_asset() -> &'static str {
+    if cfg!(windows) {
+        "gallery-dl.exe"
+    } else {
+        GALLERY_DL_ASSET
+    }
+}
+
+/// Managed binary file name once installed into the managed dir. Windows
+/// needs the `.exe` extension for direct execution.
+pub fn managed_binary_name() -> &'static str {
+    gallery_dl_asset()
+}
 
 /// Base URL of the pinned release assets on Codeberg.
 pub fn release_base_url() -> String {
@@ -31,7 +49,7 @@ pub fn managed_dir() -> Option<PathBuf> {
 
 /// Path of the managed binary if it is already installed.
 fn managed_installed() -> Option<PathBuf> {
-    let p = managed_dir()?.join(GALLERY_DL_ASSET);
+    let p = managed_dir()?.join(managed_binary_name());
     p.is_file().then_some(p)
 }
 
@@ -219,9 +237,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn asset_name_matches_os() {
+        let asset = super::gallery_dl_asset();
+        if cfg!(windows) {
+            assert_eq!(asset, "gallery-dl.exe");
+        } else {
+            assert_eq!(asset, "gallery-dl.bin");
+        }
+        // The managed name is always the same as the published asset name.
+        assert_eq!(super::managed_binary_name(), asset);
+    }
+
     const SUMS: &str = "\
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  gallery-dl.bin
-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  other-file.tar.gz
+0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  gallery-dl.exe
+0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde1  other-file.tar.gz
 ";
 
     #[test]
@@ -229,6 +260,11 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  gallery-dl.bin
         assert_eq!(
             extract_sha256_for(SUMS, "gallery-dl.bin"),
             Some("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into())
+        );
+        // Windows asset is listed in the same SHA256SUMS file.
+        assert_eq!(
+            extract_sha256_for(SUMS, "gallery-dl.exe"),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into())
         );
         assert_eq!(extract_sha256_for(SUMS, "missing.bin"), None);
         assert_eq!(extract_sha256_for("", "gallery-dl.bin"), None);

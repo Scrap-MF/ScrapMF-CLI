@@ -2,8 +2,9 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use sha2::Digest;
 
-use crate::application::backend::{self, GALLERY_DL_ASSET, GALLERY_DL_PIN};
+use crate::application::backend::{self, GALLERY_DL_PIN};
 use crate::{config, output};
 
 /// `scrapmf setup` — install the bundled pinned gallery-dl.
@@ -41,18 +42,14 @@ pub fn run(yes: bool) -> Result<()> {
     ));
 
     // x86_64 has an official standalone build → direct managed install.
-    // Every other arch (aarch64, armv7, riscv64, …) has none → offer a
-    // pinned pipx/pip install instead of just printing advice.
-    if !is_x86_64() {
+    // Every other desktop arch has none (Termux/ARM handled below); Windows
+    // x86_64 DOES have one (gallery-dl.exe).
+    if std::env::consts::ARCH == "x86_64" || cfg!(windows) {
+        install_managed(yes)
+    } else {
         install_via_python(yes);
-        return Ok(());
+        Ok(())
     }
-
-    install_managed(yes)
-}
-
-fn is_x86_64() -> bool {
-    matches!(std::env::consts::ARCH, "x86_64")
 }
 
 /// One candidate installer for the pinned gallery-dl on non-x86_64 hosts.
@@ -216,7 +213,8 @@ fn install_managed(yes: bool) -> Result<()> {
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
 
-    let url = format!("{}/{}", backend::release_base_url(), GALLERY_DL_ASSET);
+    let asset = backend::gallery_dl_asset();
+    let url = format!("{}/{}", backend::release_base_url(), asset);
     println!("→ Installing bundled gallery-dl v{GALLERY_DL_PIN} (~23 MB download)");
     if !yes
         && !confirm(&format!(
@@ -229,7 +227,7 @@ fn install_managed(yes: bool) -> Result<()> {
 
     let work = dir.join(format!(".setup-{}", std::process::id()));
     std::fs::create_dir_all(&work)?;
-    let asset_path = work.join(GALLERY_DL_ASSET);
+    let asset_path = work.join(asset);
     let sums_path = work.join("SHA256SUMS");
 
     fetch(&asset_path, &url)?;
@@ -240,11 +238,12 @@ fn install_managed(yes: bool) -> Result<()> {
 
     echo_step("Verifying SHA256 checksum");
     let sums = std::fs::read_to_string(&sums_path).context("read SHA256SUMS")?;
-    let expected = backend::extract_sha256_for(&sums, GALLERY_DL_ASSET)
-        .context("gallery-dl.bin not listed in official SHA256SUMS — aborting")?;
+    let expected = backend::extract_sha256_for(&sums, asset).context(format!(
+        "{asset} not listed in official SHA256SUMS — aborting"
+    ))?;
     verify_sha256(&asset_path, &expected)?;
 
-    let target = dir.join(GALLERY_DL_ASSET);
+    let target = dir.join(backend::managed_binary_name());
     make_executable(&asset_path)?;
     std::fs::rename(&asset_path, &target)
         .with_context(|| format!("move into {}", target.display()))?;
@@ -319,17 +318,20 @@ fn fetch(dest: &Path, url: &str) -> Result<()> {
     Ok(())
 }
 
+/// Compute SHA-256 in Rust — no external tools needed, works on Windows too.
 fn verify_sha256(file: &Path, expected_hex: &str) -> Result<()> {
-    let out = std::process::Command::new("sha256sum")
-        .arg(file)
-        .output()
-        .context("run sha256sum")?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let got = text
-        .split_whitespace()
-        .next()
-        .context("sha256sum produced no output")?
-        .to_ascii_lowercase();
+    use std::io::Read;
+    let mut f = std::fs::File::open(file).with_context(|| format!("open {}", file.display()))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf).context("read file for hashing")?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let got: String = format!("{:x}", hasher.finalize());
     if got != expected_hex.to_ascii_lowercase() {
         anyhow::bail!(
             "checksum mismatch for {}: expected {expected_hex}, got {got}",

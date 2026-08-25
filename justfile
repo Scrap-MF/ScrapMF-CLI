@@ -80,3 +80,35 @@ lint-workflows:
     else
         echo "actionlint not installed — skipping (cargo install actionlint)"
     fi
+
+# Test AUR packaging in an Arch container (works on any distro with podman).
+# NEVER mounts the repo: copies the PKGBUILD to a temp dir first, so the
+# container cannot leave stray files behind. Rootless podman maps container
+# root to your host UID, so pacman works as root AND output files stay yours.
+# Usage: just pkgtest [VERSION]   # default: 1.1.0 (must be a published tag)
+pkgtest version="1.1.0":
+    #!/usr/bin/env sh
+    set -eu
+    command -v podman >/dev/null 2>&1 || {
+        echo "✖ podman is required (Fedora: sudo dnf install podman)" >&2
+        exit 1
+    }
+    work="$(mktemp -d /tmp/scrapmf-pkgtest.XXXXXX)"
+    sed "s/^pkgver=.*/pkgver={{version}}/" PKGBUILD > "$work/PKGBUILD"
+    echo "→ Testing PKGBUILD at pkgver={{version}} in $work"
+    if podman run --rm \
+        -v "$work:/pkg:Z" docker.io/library/archlinux:base-devel \
+        sh -c "
+            pacman -Syu --noconfirm base-devel cargo git &&
+            useradd -m builder && chown -R builder:builder /pkg &&
+            su builder -c 'cd /pkg && makepkg -f' &&
+            chown -R 0:0 /pkg"; then
+        echo "✔ package built:"
+        ls -la "$work"/scrapmf-[0-9]*.pkg.tar.zst
+        echo "→ contents:"
+        tar -tf "$work"/scrapmf-[0-9]*.pkg.tar.zst | grep -v '^\.\(PKGINFO\|MTREE\|BUILDINFO\)'
+        echo "→ kept for inspection: $work  (delete with: rm -rf \"$work\")"
+    else
+        echo "✖ build failed — workdir kept: $work" >&2
+        exit 1
+    fi
