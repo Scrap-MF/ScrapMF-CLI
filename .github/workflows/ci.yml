@@ -53,14 +53,18 @@ jobs:
       - name: Security policy (cargo-deny)
         run: cargo deny --config .cargo/deny.toml check
 
-  release:
+  # Build every target in parallel and upload archives as workflow artifacts.
+  # The release itself is created by the single `publish` job below — matrix
+  # jobs must never call action-gh-release concurrently: they race to create
+  # the same release, losers fail on upload (seen on v1.0.0), and a published
+  # release is immutable so late assets are rejected outright.
+  build:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: ci
-    # contents:write lets softprops/action-gh-release attach assets
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -103,9 +107,32 @@ jobs:
         run: |
           tar czf scrapmf-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release scrapmf
           sha256sum scrapmf-${{ matrix.target }}.tar.gz > scrapmf-${{ matrix.target }}.tar.gz.sha256
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrapmf-${{ matrix.target }}
+          path: |
+            scrapmf-${{ matrix.target }}.tar.gz
+            scrapmf-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+  # Single writer: one job gathers all archives and creates exactly one
+  # release — no races, all-or-nothing visibility.
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - name: Download all archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: scrapmf-*
+          merge-multiple: true
+          path: dist
       - name: Upload release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            scrapmf-${{ matrix.target }}.tar.gz
-            scrapmf-${{ matrix.target }}.tar.gz.sha256
+          files: dist/*
