@@ -8,12 +8,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
-mod fs;
+pub(crate) mod fs;
 mod migrations;
 mod templates;
 use fs::write_config_file;
 pub use migrations::{
-    migrate_all_sites_filenames, migrate_all_sites_highlights, migrate_legacy_placeholders,
+    migrate_all_sites_filenames, migrate_all_sites_highlights, migrate_inline_config_to_files,
+    migrate_legacy_placeholders,
 };
 pub use templates::{
     ensure_example_sites, ensure_tiktok_site, ensure_twitter_site, ensure_vsco_site,
@@ -67,6 +68,9 @@ pub fn resolve_site<'a>(
 
 /// Load config from XDG `~/.config/scrapmf/config.toml` and presets from `presets/**/*.toml`.
 pub fn load() -> anyhow::Result<Config> {
+    // One-time migration: inline [sites]/[presets]/[profiles] → separate files.
+    // Idempotent and cheap (early return if no inline tables).
+    let _ = migrations::migrate_inline_config_to_files();
     let Some(path) = config_path() else {
         return Ok(Config::default());
     };
@@ -215,7 +219,7 @@ pub fn save(cfg: &Config) -> anyhow::Result<()> {
         fs::restrict_perms(parent, true);
     }
     let content = toml::to_string_pretty(cfg).context("serialize config")?;
-    write_config_file(&path, &content, true)
+    write_config_file(&path, &content)
 }
 
 /// Config file path (XDG)
@@ -296,7 +300,7 @@ pub fn ensure_default_config() -> anyhow::Result<()> {
             && !s.contains("output_dir = \"~/scrapmf\"")
         {
             let new = s.replace("output_dir = \"~\"", "output_dir = \"~/scrapmf\"");
-            match write_config_file(&path, &new, true) {
+            match write_config_file(&path, &new) {
                 Ok(()) => tracing::info!(
                     path = %path.display(),
                     "migrated output_dir \"~\" -> \"~/scrapmf\""
@@ -322,15 +326,12 @@ pub fn ensure_default_config() -> anyhow::Result<()> {
 #
 # [general]
 #   output_dir = "~/scrapmf"                    # base output dir (HOME/scrapmf; CLI --output overrides; tilde ~/ expanded)
-#
-# [presets]          # legacy: presets/<name>.toml (deprecated, use sites/ and profiles/)
-# [sites]            # inline sites map (prefer sites/*.toml files)
-# [profiles]         # inline profiles map (prefer profiles/*.toml files)
+#   archive = true                              # download archive (dedup per-account)
 # See: sites/*.toml for per-site options
 
 "#;
     let content = format!("{header}{body}");
-    write_config_file(&path, &content, false)
+    write_config_file(&path, &content)
 }
 
 #[cfg(test)]

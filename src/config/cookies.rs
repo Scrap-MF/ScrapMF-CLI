@@ -244,6 +244,7 @@ pub fn delete_profile(name: &str) -> Result<bool, String> {
 }
 
 /// Human summary of a profile: total/expired cookies and domains covered.
+/// Domains beyond 2 are collapsed to keep the line within the menu width.
 pub fn profile_summary(name: &str) -> Result<String, String> {
     let cookies = load_profile(name)?;
     let now = now_secs();
@@ -255,9 +256,13 @@ pub fn profile_summary(name: &str) -> Result<String, String> {
     let mut domains: Vec<&str> = cookies.iter().map(|c| c.domain.as_str()).collect();
     domains.sort_unstable();
     domains.dedup();
-    Ok(format!(
-        "{total} cookie(s), {expired} expired — domains: {}",
+    let domains_str = if domains.len() <= 2 {
         domains.join(", ")
+    } else {
+        format!("{}, +{} more", domains[..2].join(", "), domains.len() - 2)
+    };
+    Ok(format!(
+        "{total} cookie(s), {expired} expired — domains: {domains_str}"
     ))
 }
 
