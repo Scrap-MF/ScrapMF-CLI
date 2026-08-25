@@ -292,6 +292,8 @@ mod tests {
             extra_urls: vec![],
             profile_name: Some("example".to_string()),
             extra_extractor_opts: vec![],
+
+            ..Default::default()
         };
         let args = GalleryDl.build_args(&req).unwrap();
         let strs: Vec<String> = args
@@ -355,6 +357,7 @@ mod tests {
             extra_urls: Vec::new(),
             profile_name: None,
             extra_extractor_opts: Vec::new(),
+            no_archive: false,
         }
     }
 

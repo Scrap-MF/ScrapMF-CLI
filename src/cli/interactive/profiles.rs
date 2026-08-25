@@ -353,6 +353,8 @@ pub(super) fn prompt_scrape_as_profile() {
                     },
                     profile_name: Some(profile_choice.clone()),
                     extra_extractor_opts: Vec::new(),
+
+                    ..Default::default()
                 };
                 requests.push((
                     pass_req,
@@ -379,6 +381,8 @@ pub(super) fn prompt_scrape_as_profile() {
             extra_urls: extra_urls.clone(),
             profile_name: Some(profile_choice.clone()),
             extra_extractor_opts: Vec::new(),
+
+            ..Default::default()
         };
         requests.push((req, site_name.clone(), username, kinds_desc));
     }

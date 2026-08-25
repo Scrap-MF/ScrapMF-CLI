@@ -499,6 +499,8 @@ pub(super) fn prompt_scrape_direct_urls() {
                 extra_urls: Vec::new(),
                 profile_name: None,
                 extra_extractor_opts: Vec::new(),
+
+                ..Default::default()
             };
             jobs.push((
                 req,
@@ -524,6 +526,8 @@ pub(super) fn prompt_scrape_direct_urls() {
                     extra_urls: Vec::new(),
                     profile_name: None,
                     extra_extractor_opts: Vec::new(),
+
+                    ..Default::default()
                 },
                 "general".to_string(),
                 format!("general:{label}"),
@@ -665,6 +669,8 @@ pub(super) fn prompt_quick_scrape() {
             extra_urls,
             profile_name: Some(profile_name),
             extra_extractor_opts: Vec::new(),
+
+            ..Default::default()
         }
     };
 

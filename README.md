@@ -41,6 +41,7 @@ macOS builds are not published yet — install from source with `cargo install -
 | Interactive profiles | One person → multiple accounts across sites, content-type selection |
 | Live TUI dashboard | Progress per job, log feed, Ctrl+C cancels in <1s even mid-download |
 | Integrity checks | Post-scrape audit: truncated MP4s (moov scan), codec/resolution summary, `.part` orphans |
+| Download archive | Per-account dedup in your config dir (`archive/<site>/<account>.jsonl`) — re-runs skip already-downloaded media. Portable plain text, no lock-in |
 | Challenge awareness | Detects anti-bot losses and tells you to refresh your browser session |
 | Safe orchestration | argv[]-only invocation, allow-listed extra args, path traversal rejection |
 | Good errors | `help:` / `note:` hints like rustc, `NO_COLOR` support |
@@ -234,6 +235,26 @@ Exit codes: `0` success · `1` error · `2` missing subcommand · `130` cancelle
 > gallery-dl) are renamed to their new `scrapmf` equivalents. Nothing to redo.
 
 ---
+
+## Download archive (dedup)
+
+scrapmf remembers what you already downloaded, **per site and account**, in
+plain-text JSONL files you own:
+
+```
+~/.config/scrapmf/archive/instagram/alice.jsonl
+~/.config/scrapmf/archive/tiktok/bob.jsonl
+```
+
+Each line records one downloaded media item. On the next scrape of the same
+account, those items are skipped before downloading.
+
+- **Automatic**: enabled by default for known sites; disable per run with
+  `scrapmf scrape --no-archive`, or globally with `[general] archive = false`
+  in your config.
+- **Portable**: copy/sync the `archive/` folder between machines and dedup
+  follows.
+- `scrapmf doctor` shows how many media are recorded.
 
 ## Configuration
 

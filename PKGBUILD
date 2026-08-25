@@ -11,7 +11,7 @@
 # (e.g. ScrapMF-CLI-1.1.0), NOT "$pkgname-$pkgver" — the cd targets below
 # match that naming.
 pkgname=scrapmf
-pkgver=1.1.0
+pkgver=1.2.0
 pkgrel=1
 pkgdesc="Safe, interactive archiver for social media galleries"
 arch=('x86_64')
@@ -22,9 +22,9 @@ optdepends=('gallery-dl: primary backend'
             'yt-dlp: reserved for future use (videos backend)')
 makedepends=('cargo' 'git')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/Scrap-MF/ScrapMF-CLI/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')  # replace via updpkgsums before publishing to the AUR
+sha256sums=('eec873b65d94ea531fa96c62a5e3297bc2393545beded399f36a07405bc8764a')
 
-# Run tests during build? Off by default: packaging shouldn't run 109 tests.
+# Run tests during build? Off by default: packaging shouldn't run 168 tests.
 if [ -n "$ENABLE_CHECK" ]; then
   check() {
     cd "ScrapMF-CLI-$pkgver"

@@ -43,6 +43,15 @@ pub struct General {
     /// Base output directory (tilde ~/ expanded at use time)
     #[serde(default = "default_output_dir")]
     pub output_dir: PathBuf,
+    /// Download archive (dedup): remember downloaded media per account so
+    /// re-runs skip them. Backed by JSONL files under
+    /// `<config>/archive/<site>/<account>.jsonl`.
+    #[serde(default = "default_true")]
+    pub archive: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -138,6 +147,7 @@ impl Default for General {
     fn default() -> Self {
         Self {
             output_dir: PathBuf::from("~/scrapmf"),
+            archive: true,
         }
     }
 }

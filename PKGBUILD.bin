@@ -2,11 +2,8 @@
 # Prebuilt binary package — no Rust toolchain required.
 # See PKGBUILD for the build-from-source variant.
 #
-# After bumping pkgver, refresh checksums with:
-#   updpkgsums          # or:
-#   makepkg -g >> PKGBUILD
 pkgname=scrapmf-bin
-pkgver=1.1.0
+pkgver=1.2.0
 pkgrel=1
 pkgdesc="Safe, interactive archiver for social media galleries (prebuilt binary, musl static)"
 arch=('x86_64')
@@ -17,7 +14,7 @@ optdepends=('gallery-dl: primary backend'
 provides=('scrapmf')
 conflicts=('scrapmf')
 source=("scrapmf-$pkgver-x86_64-unknown-linux-musl.tar.gz::https://github.com/Scrap-MF/ScrapMF-CLI/releases/download/v$pkgver/scrapmf-x86_64-unknown-linux-musl.tar.gz")
-sha256sums=('84d495132ff578f71d83ae7e5df50857ae50e7baf504840b244065d50df4c4dd')
+sha256sums=('6e983a207a6eedc75986ba0fabd4d260690d256b5cf1c0064873f06ea6300b76')
 
 package() {
   install -Dm755 "scrapmf" "$pkgdir/usr/bin/scrapmf"
