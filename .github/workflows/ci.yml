@@ -6,6 +6,9 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main, develop]
+  # Manual dry-run: exercises the build matrix without creating a release
+  # (publish stays tag-only). Run it from the Actions tab before a release.
+  workflow_dispatch:
 
 # Consecutive pushes to the same branch supersede older runs — a full gate
 # for a commit we already replaced wastes runner minutes.
@@ -58,9 +61,13 @@ jobs:
   # jobs must never call action-gh-release concurrently: they race to create
   # the same release, losers fail on upload (seen on v1.0.0), and a published
   # release is immutable so late assets are rejected outright.
+  #
+  # Cross-compiling on ubuntu: Rust bundles the static musl CRT objects, so
+  # the gnu cross-gcc works as the linker for musl targets too. Windows is
+  # built natively with MSVC (standalone exe, no MinGW runtime surprises).
   build:
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     needs: ci
     permissions:
@@ -70,13 +77,23 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            cross: false
+            os: ubuntu-latest
           - target: x86_64-unknown-linux-musl
-            cross: false
+            os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
-            cross: true
+            os: ubuntu-latest
           - target: aarch64-unknown-linux-musl
-            cross: true
+            os: ubuntu-latest
+          - target: armv7-unknown-linux-gnueabihf
+            os: ubuntu-latest
+          - target: armv7-unknown-linux-musleabihf
+            os: ubuntu-latest
+          - target: riscv64gc-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: powerpc64le-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -84,29 +101,45 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Install cross toolchains
-        if: matrix.cross
+      - name: Install cross toolchains (armv7)
+        if: startsWith(matrix.target, 'armv7-')
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
+          sudo apt-get install -y gcc-arm-linux-gnueabihf
+      - name: Install cross toolchains (aarch64)
+        if: startsWith(matrix.target, 'aarch64-')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Install cross toolchains (riscv64 / powerpc64le)
+        if: contains(matrix.target, 'riscv64') || startsWith(matrix.target, 'powerpc64le')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-riscv64-linux-gnu gcc-powerpc64le-linux-gnu
       - name: Install musl tools (x86_64)
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
       - name: Build
+        shell: bash
         run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            # Rust bundles static musl CRT objects, so the gnu cross-gcc works
-            # as linker for the musl target too.
-            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc
-          fi
+          case "${{ matrix.target }}" in
+            armv7-*)                    export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc
+                                        export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=arm-linux-gnueabihf-gcc ;;
+            aarch64-unknown-linux-*)    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+                                        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc ;;
+            riscv64gc-*)                export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc ;;
+            powerpc64le-*)              export CARGO_TARGET_POWERPC64LE_UNKNOWN_LINUX_GNU_LINKER=powerpc64le-linux-gnu-gcc ;;
+          esac
           cargo build --release --target ${{ matrix.target }} --locked
       - name: Create archive
+        shell: bash
         run: |
-          tar czf scrapmf-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release scrapmf
-          sha256sum scrapmf-${{ matrix.target }}.tar.gz > scrapmf-${{ matrix.target }}.tar.gz.sha256
+          BIN=scrapmf
+          case "${{ matrix.target }}" in *windows*) BIN=scrapmf.exe ;; esac
+          tar czf "scrapmf-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" "$BIN"
+          sha256sum "scrapmf-${{ matrix.target }}.tar.gz" > "scrapmf-${{ matrix.target }}.tar.gz.sha256"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

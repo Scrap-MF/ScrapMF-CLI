@@ -17,7 +17,20 @@
 - **Two modes:**
   - **Automation (CI/scripts):** `scrapmf scrape <URL> --output ./out`
   - **Interactive:** run `scrapmf` with no args on a TTY → guided menus (profiles, per-account content selection, live dashboard)
-- **Universal Linux:** static musl builds for x86_64 and aarch64 — runs on Arch, Fedora, Debian, Ubuntu, openSUSE, NixOS, WSL, Raspberry Pi…
+- **Universal:** static musl builds for x86_64, aarch64 and armv7 — runs on Arch, Fedora, Debian, Ubuntu, openSUSE, NixOS, WSL, Raspberry Pi, **Termux (Android)**. Also published: riscv64, powerpc64le (gnu) and a native Windows x86_64 build.
+
+## Supported platforms
+
+| Platform | Targets | Linking |
+|---|---|---|
+| Linux x86_64 | `x86_64-unknown-linux-gnu` / `-musl` | musl = static |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` / `-musl` | musl = static |
+| Linux ARM32 | `armv7-unknown-linux-gnueabihf` / `-musleabihf` | Raspberry Pi 32-bit, older phones |
+| Linux RISC-V 64 | `riscv64gc-unknown-linux-gnu` | dynamic glibc |
+| Linux POWER 64 LE | `powerpc64le-unknown-linux-gnu` | dynamic glibc |
+| Windows x86_64 | `x86_64-pc-windows-msvc` | standalone exe |
+
+macOS builds are not published yet — install from source with `cargo install --path .`.
 
 ## Highlights
 
@@ -70,6 +83,32 @@ paru -S scrapmf-bin   # prebuilt static binary
 # or
 paru -S scrapmf       # build from source
 ```
+
+**Windows:** download `scrapmf-x86_64-pc-windows-msvc.tar.gz` from the [releases page](https://github.com/Scrap-MF/ScrapMF-CLI/releases) and extract `scrapmf.exe` anywhere in your `PATH`.
+
+<details>
+<summary><strong>Termux (Android)</strong></summary>
+
+The static musl builds run natively on Android — no root, no proot:
+
+```bash
+pkg install curl tar
+curl -fsSL https://raw.githubusercontent.com/Scrap-MF/ScrapMF-CLI/main/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"    # add to ~/.bashrc
+```
+
+The installer auto-selects the static build for your architecture (`aarch64` or `armv7`). Then set up the backend with Python:
+
+```bash
+pkg install python
+pip install gallery-dl==1.32.9
+scrapmf doctor   # should report gallery-dl found [system]
+```
+
+> Not yet verified on a physical device — if anything misbehaves, please
+> [open an issue](https://github.com/Scrap-MF/ScrapMF-CLI/issues).
+
+</details>
 
 ```bash
 scrapmf --version      # verify any method
@@ -232,7 +271,7 @@ fix(providers): handle gallery-dl not found
 chore(config): rotate migration backups
 ```
 
-Releases: push a `v*` tag — CI builds static binaries for x86_64 and aarch64 (gnu + musl) and attaches them to the GitHub Release with SHA-256 checksums.
+Releases: push a `v*` tag — CI builds binaries for Linux x86_64/aarch64/armv7 (gnu + musl), riscv64, powerpc64le and Windows x86_64, and attaches them to the GitHub Release with SHA-256 checksums.
 
 ### Version bumps are automated
 
@@ -250,7 +289,9 @@ Flow ([release-plz](https://release-plz.dev)):
 2. The release-plz workflow opens a **"chore(release): vX.Y.Z" PR** with the
    version bump already applied to `Cargo.toml` / `Cargo.lock`.
 3. Merging that PR makes release-plz push the `vX.Y.Z` tag.
-4. CI builds the 4 static binaries and publishes the GitHub Release.
+4. CI builds all platform binaries and publishes the GitHub Release
+   (single `publish` job — matrix jobs only upload artifacts, never touch
+   the release itself).
 
 Check what version would come next at any time:
 

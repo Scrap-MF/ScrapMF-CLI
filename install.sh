@@ -21,16 +21,58 @@ esac
 INSTALL_DIR="${SCRAPMF_INSTALL_DIR:-${2:-$HOME/.local/bin}}"
 
 # --- architecture / target detection ---------------------------------------
+OS=$(uname -s)
 ARCH=$(uname -m)
-case "$ARCH" in
-  x86_64|amd64) ARCH_PART="x86_64" ;;
-  aarch64|arm64) ARCH_PART="aarch64" ;;
-  *)
-    echo "✖ unsupported architecture: $ARCH (only x86_64 and aarch64 builds exist)" >&2
+
+# Linux targets; LIBC defaults to musl (static) and can be switched with --gnu.
+# Termux (Android) is aarch64/armv7 too — the static musl builds run as-is.
+case "$OS" in
+  Darwin)
+    echo "✖ macOS builds are not published yet." >&2
+    echo "  Install from source instead:" >&2
+    echo "    git clone https://github.com/${REPO}.git && cd ScrapMF-CLI && cargo install --path ." >&2
+    exit 1
+    ;;
+  MINGW*|MSYS*|CYGWIN*)
+    echo "✖ Windows: download scrapmf-x86_64-pc-windows-msvc.tar.gz from" >&2
+    echo "  https://github.com/${REPO}/releases and extract scrapmf.exe manually." >&2
     exit 1
     ;;
 esac
-TARGET="${ARCH_PART}-unknown-linux-${LIBC}"
+
+case "$ARCH" in
+  x86_64|amd64)
+    ARCH_PART="x86_64"
+    case "$LIBC" in gnu) ;; *) LIBC="musl" ;; esac
+    ;;
+  aarch64|arm64) ARCH_PART="aarch64" ;;
+  armv7l|armv8l|armv7)
+    ARCH_PART="armv7"
+    TARGET_SUFFIX="musleabihf"
+    if [ "$LIBC" = "gnu" ]; then TARGET_SUFFIX="gnueabihf"; fi
+    ;;
+  riscv64|riscv64gc)
+    ARCH_PART="riscv64gc"
+    # Only the gnu build is published for riscv64.
+    LIBC="gnu"; TARGET_SUFFIX="gnu"
+    ;;
+  ppc64le|powerpc64le)
+    ARCH_PART="powerpc64le"
+    # Only the gnu build is published for powerpc64le.
+    LIBC="gnu"; TARGET_SUFFIX="gnu"
+    ;;
+  *)
+    echo "✖ unsupported architecture: $ARCH" >&2
+    echo "  published builds: linux x86_64 · aarch64 · armv7 · riscv64 · powerpc64le, windows x86_64" >&2
+    exit 1
+    ;;
+esac
+
+if [ -n "${TARGET_SUFFIX:-}" ]; then
+  TARGET="${ARCH_PART}-unknown-linux-${TARGET_SUFFIX}"
+else
+  TARGET="${ARCH_PART}-unknown-linux-${LIBC}"
+fi
 
 ASSET="${BINARY}-${TARGET}.tar.gz"
 if [ "$VERSION" = "latest" ]; then
