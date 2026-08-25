@@ -101,8 +101,8 @@ The installer auto-selects the static build for your architecture (`aarch64` or 
 
 ```bash
 pkg install python
-pip install gallery-dl==1.32.9
-scrapmf doctor   # should report gallery-dl found [system]
+scrapmf setup        # detects python3/pip and offers: pip install gallery-dl==1.32.9
+scrapmf doctor       # should report gallery-dl found [system]
 ```
 
 **Cookies on Android:** `--cookies-from-browser` does **not** work on Termux —
@@ -144,16 +144,23 @@ scrapmf --version      # verify any method
 
 ### Step 2 — Set up the gallery-dl backend (recommended)
 
-scrapmf ships with its **own pinned copy of gallery-dl**, independent from any system installation:
+scrapmf ships with its **own pinned copy of gallery-dl**, independent from any system installation. You don't need to install it by hand: the first time you run `scrapmf` (interactive mode), it **offers to set everything up automatically**.
+
+What the automatic setup does:
+
+- **x86_64:** downloads official gallery-dl v1.32.9 (~23 MB) + SHA256 verification into `~/.local/share/scrapmf/bin/`
+- **Other architectures (aarch64, armv7, Termux…):** detects `pipx` (preferred, keeps the version frozen) or `python3 -m pip` and offers to run `install gallery-dl==1.32.9` for you
+
+Afterwards, `scrapmf doctor` shows:
 
 ```bash
-scrapmf setup        # downloads official gallery-dl v1.32.9 (~23 MB) + SHA256 verification
 scrapmf doctor       # shows: gallery-dl 1.32.9 found [bundled (pinned)] pinned v1.32.9
 ```
 
 - The managed binary lives in `~/.local/share/scrapmf/bin/` and **never updates on its own** — new pins ship with scrapmf releases, so upstream changes can never break your setup mid-archive.
 - Your own gallery-dl (if any) is left untouched; scrapmf just won't use it.
-- x86_64: standalone build, no Python needed. aarch64: `setup` prints the equivalent pinned pipx command (`pipx install gallery-dl==1.32.9`).
+- pip/pipx installs are labelled *system (NOT pinned)* by `doctor` — avoid upgrading them manually so your version always matches what scrapmf was tested against.
+- Advanced/manual entry point: `scrapmf setup [--yes]` (hidden from `--help`, kept for scripts and recovery).
 
 <details>
 <summary>Manual backend alternative (without the bundled copy)</summary>
