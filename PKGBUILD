@@ -6,8 +6,12 @@
 # After bumping pkgver, refresh checksums with:
 #   updpkgsums          # or:
 #   makepkg -g >> PKGBUILD
+#
+# NOTE: GitHub auto-generated archives extract to "<repo>-<version>"
+# (e.g. ScrapMF-CLI-1.1.0), NOT "$pkgname-$pkgver" — the cd targets below
+# match that naming.
 pkgname=scrapmf
-pkgver=1.0.0
+pkgver=1.1.0
 pkgrel=1
 pkgdesc="Safe, interactive archiver for social media galleries"
 arch=('x86_64')
@@ -23,18 +27,18 @@ sha256sums=('SKIP')  # replace via updpkgsums before publishing to the AUR
 # Run tests during build? Off by default: packaging shouldn't run 109 tests.
 if [ -n "$ENABLE_CHECK" ]; then
   check() {
-    cd "$pkgname-$pkgver"
+    cd "ScrapMF-CLI-$pkgver"
     cargo test --all --locked
   }
 fi
 
 build() {
-  cd "$pkgname-$pkgver"
+  cd "ScrapMF-CLI-$pkgver"
   cargo build --release --locked
 }
 
 package() {
-  cd "$pkgname-$pkgver"
+  cd "ScrapMF-CLI-$pkgver"
   install -Dm755 "target/release/scrapmf" "$pkgdir/usr/bin/scrapmf"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE" 2>/dev/null || true
