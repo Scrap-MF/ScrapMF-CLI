@@ -2,9 +2,6 @@
 # Prebuilt binary package — no Rust toolchain required.
 # See PKGBUILD for the build-from-source variant.
 #
-# After bumping pkgver, refresh checksums with:
-#   updpkgsums          # or:
-#   makepkg -g >> PKGBUILD
 pkgname=scrapmf-bin
 pkgver=1.2.0
 pkgrel=1
