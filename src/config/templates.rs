@@ -197,7 +197,7 @@ pub fn ensure_example_sites() -> anyhow::Result<()> {
 #   pattern = "instagram.com"              # substring to auto-match URL
 #   output_dir = "~/Pictures/instagram"    # per-site output (CLI --output wins; default HOME = ~)
 #   cookies = "/path/cookies.txt"          # Netscape cookies.txt file (gallery-dl --cookies)
-#   cookies_from_browser = "brave"         # brave | firefox | chrome | chromium | edge | opera | vivaldi[:profile] (gallery-dl --cookies-from-browser)
+#   cookies_from_browser = "brave"         # brave | firefox | chrome | chromium | edge | opera | vivaldi[:profile] (gallery-dl --cookies-from-browser; DESKTOP ONLY — Android/Termux browsers are unreadable, use `cookies` files there)
 #   archive = "~/.config/scrapmf/archive/instagram.sqlite" # DEPRECATED — removed
 #   extra_args = ["--restrict-filenames", "auto", "--proxy", "http://..."]  # allow-list: --proxy, --user-agent, --sleep, --sleep-request, --sleep-429, --limit-rate, --cookies, --cookies-from-browser, --restrict-filenames, --destination, --get-urls (--exec forbidden; ;|&$><` rejected)
 #   filename_template = "{date:%Y-%m-%d}_{post_id}_{num:02d}.{extension}"  # → gallery-dl -o filename= (date first; _num:02d preserves carrousel order 01,02,03)

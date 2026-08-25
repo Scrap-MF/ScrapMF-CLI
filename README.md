@@ -105,8 +105,36 @@ pip install gallery-dl==1.32.9
 scrapmf doctor   # should report gallery-dl found [system]
 ```
 
-> Not yet verified on a physical device — if anything misbehaves, please
-> [open an issue](https://github.com/Scrap-MF/ScrapMF-CLI/issues).
+**Cookies on Android:** `--cookies-from-browser` does **not** work on Termux —
+Android browsers keep their cookie databases inside app-private storage that
+Termux cannot read without root. That's an OS limit, not a scrapmf bug. Use a
+cookie file instead:
+
+1. In Firefox for Android, install the **Cookie-Editor** or **Export Cookies**
+   extension, log in to the site, and export as Netscape format (`cookies.txt`).
+2. Copy the export into a scrapmf cookie profile:
+
+   ```bash
+   termux-setup-storage    # one-time: grants access to Downloads
+   mkdir -p ~/.config/scrapmf/cookies
+   cp ~/storage/downloads/cookies.txt ~/.config/scrapmf/cookies/tiktok.txt
+   ```
+
+3. Use it:
+
+   ```bash
+   scrapmf scrape "https://www.tiktok.com/@user" \
+     --cookies ~/.config/scrapmf/cookies/tiktok.txt
+   ```
+
+   Or pick the profile from interactive mode. Alternative: export cookies on a
+   desktop browser (same account) and transfer the file via USB, Syncthing, or `scp`.
+
+> Cookie files are account credentials — they are written with `0600`
+> permissions and must never be shared or committed.
+
+> Verified working on a physical device (aarch64). If anything misbehaves,
+> please [open an issue](https://github.com/Scrap-MF/ScrapMF-CLI/issues).
 
 </details>
 
