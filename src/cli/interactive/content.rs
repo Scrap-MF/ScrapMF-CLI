@@ -57,7 +57,8 @@ pub(super) fn content_options(site: &str) -> Vec<&'static str> {
         "twitter" => vec!["All", "Media", "Profile"],
         // vsco: photos AND videos share the gallery folder (single pass)
         "vsco" => vec!["All", "Media", "Profile"],
-        _ => vec!["All"],
+        "threads" => vec!["All", "Posts", "Profile"],
+        _ => vec!["All", "Posts"],
     }
 }
 
@@ -95,7 +96,10 @@ pub(super) fn is_identity_segment(s: &str) -> bool {
 /// Whether a site offers a content-type menu (multiple content kinds).
 /// Generic sites only have Posts — no menu, auto [Posts].
 pub(super) fn site_has_content_menu(site: &str) -> bool {
-    matches!(site, "instagram" | "tiktok" | "twitter" | "vsco")
+    matches!(
+        site,
+        "instagram" | "tiktok" | "twitter" | "vsco" | "threads"
+    )
 }
 
 /// The "apply same selection to all" shortcut only applies when:
@@ -112,6 +116,16 @@ pub(super) fn shortcut_applicable(selected: &[(String, String, crate::config::Ac
 
 pub(super) fn build_tagged_urls(site: &str, username: &str) -> Vec<(ContentKind, String)> {
     match site {
+        "threads" => vec![
+            (
+                ContentKind::Posts,
+                format!("https://www.threads.com/@{username}"),
+            ),
+            (
+                ContentKind::Profile,
+                format!("https://www.threads.com/@{username}"),
+            ),
+        ],
         "instagram" => vec![
             (
                 ContentKind::Posts,
@@ -264,7 +278,7 @@ pub(super) fn kinds_description(site: &str, kinds: &[ContentKind]) -> String {
 
 pub(super) fn prompt_content_kinds(site: &str, label: &str) -> Vec<ContentKind> {
     crate::cli::interactive::clear_screen();
-    let picked =
+    let result =
         MultiSelect::new(
             format!("Content for {label}").as_str(),
             content_options(site)
@@ -291,9 +305,20 @@ pub(super) fn prompt_content_kinds(site: &str, label: &str) -> Vec<ContentKind> 
                 })
             },
         )
-        .prompt()
-        .unwrap_or_default();
-    resolve_kinds(site, &picked)
+        .prompt();
+    match result {
+        Ok(picked) => {
+            tracing::debug!(site = %site, picked = ?picked, "content kinds selected");
+            resolve_kinds(site, &picked)
+        }
+        Err(e) => {
+            // InquireError::OperationCanceled (Esc) or Custom validator error surfaced as Err
+            eprintln!("content selection failed: {e}");
+            tracing::warn!(site = %site, error = %e, "content kinds prompt failed/canceled");
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            Vec::new()
+        }
+    }
 }
 
 /// Preview + Confirm + sequential execution of built jobs.
@@ -501,7 +526,8 @@ mod tests {
         );
         assert_eq!(content_options("twitter"), vec!["All", "Media", "Profile"]);
         assert_eq!(content_options("vsco"), vec!["All", "Media", "Profile"]);
-        assert_eq!(content_options("unknown"), vec!["All"]);
+        assert_eq!(content_options("threads"), vec!["All", "Posts", "Profile"]);
+        assert_eq!(content_options("unknown"), vec!["All", "Posts"]);
     }
 
     #[test]

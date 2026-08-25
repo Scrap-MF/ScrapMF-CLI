@@ -49,6 +49,10 @@ pub enum Commands {
         /// Disable the download archive (dedup) for this run
         #[arg(long)]
         no_archive: bool,
+
+        /// Threads only: download profile picture instead of posts
+        #[arg(long)]
+        profile_pic_only: bool,
     },
 
     /// Manage configuration

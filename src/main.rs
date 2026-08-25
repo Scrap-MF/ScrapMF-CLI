@@ -39,6 +39,7 @@ fn ensure_app_config() {
         ("tiktok site", scrapmf::config::ensure_tiktok_site),
         ("twitter site", scrapmf::config::ensure_twitter_site),
         ("vsco site", scrapmf::config::ensure_vsco_site),
+        ("threads site", scrapmf::config::ensure_threads_site),
         ("site highlights migration", || {
             scrapmf::config::migrate_all_sites_highlights().map(|_: usize| ())
         }),
@@ -69,6 +70,7 @@ fn main() -> Result<()> {
             cookies_from_browser,
             dry_run,
             no_archive,
+            profile_pic_only,
         }) => {
             ensure_app_config();
             commands::scrape::run(
@@ -79,6 +81,7 @@ fn main() -> Result<()> {
                 cookies_from_browser,
                 dry_run,
                 no_archive,
+                profile_pic_only,
                 cli.verbose,
             )
             .context("scrape command failed")?;

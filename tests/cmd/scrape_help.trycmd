@@ -15,6 +15,7 @@ Options:
       --cookies-from-browser <BROWSER>  Cookies from browser (e.g. firefox, brave, chrome)
       --dry-run                         Do not download, only print what would be done
       --no-archive                      Disable the download archive (dedup) for this run
+      --profile-pic-only                Threads only: download profile picture instead of posts
   -h, --help                            Print help
 
 ```

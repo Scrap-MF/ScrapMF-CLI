@@ -358,6 +358,7 @@ mod tests {
             profile_name: None,
             extra_extractor_opts: Vec::new(),
             no_archive: false,
+            profile_pic_only: false,
         }
     }
 

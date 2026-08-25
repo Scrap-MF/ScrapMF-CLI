@@ -92,6 +92,16 @@ fn general_settings_menu() {
                 std::thread::sleep(std::time::Duration::from_millis(1500));
                 continue;
             }
+            let expanded = crate::config::expand_output_dir(&new_path);
+            if let Some(home) = dirs::home_dir()
+                && expanded == home
+            {
+                println!(
+                    "✖ output directory cannot be $HOME itself — use a subdirectory like ~/scrapmf"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                continue;
+            }
             let mut new_cfg = cfg.clone();
             new_cfg.general.output_dir = new_path;
             match crate::config::save(&new_cfg) {

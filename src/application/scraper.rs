@@ -56,6 +56,8 @@ pub struct ScrapeRequest {
     pub archive: Option<std::path::PathBuf>,
     /// Disable dedup entirely for this request (CLI `--no-archive`).
     pub no_archive: bool,
+    /// Threads: download only profile picture (avatar)
+    pub profile_pic_only: bool,
     pub rate_limit: Option<crate::config::RateLimit>,
     pub extractor_options: std::collections::HashMap<String, toml::Value>,
     pub filename_template: Option<String>,
@@ -482,6 +484,10 @@ fn apply_sub_url_overrides(req: &mut ScrapeRequest, url: &str) {
     }
 }
 
+fn is_threads_url(url: &str) -> bool {
+    url.contains("threads.com") || url.contains("threads.net")
+}
+
 fn run_one_sub_scrape(
     req: &ScrapeRequest,
     url: &str,
@@ -489,16 +495,29 @@ fn run_one_sub_scrape(
     hooks: Option<&mut ScrapeHooks>,
     abort: &std::sync::atomic::AtomicBool,
 ) -> anyhow::Result<usize> {
-    let provider = crate::providers::gallery_dl::GalleryDl;
-    // Resolved binary (bundled pinned copy by default, never the user's own)
-    let binary = crate::providers::gallery_dl::GalleryDl::binary()?
-        .to_string_lossy()
-        .into_owned();
-    // Build args with the specific sub-url
-    let mut sub_req = req.clone();
-    sub_req.url = url.to_string();
-    apply_sub_url_overrides(&mut sub_req, url);
-    let mut args = provider.build_args(&sub_req)?;
+    // Pick provider like gallery-dl: threads URLs go to threadstractor
+    let is_threads = is_threads_url(url);
+    let (binary, mut args) = if is_threads {
+        let p = crate::providers::threadstractor::Threadstractor;
+        let bin = crate::providers::threadstractor::Threadstractor::binary()?
+            .to_string_lossy()
+            .into_owned();
+        let mut sub_req = req.clone();
+        sub_req.url = url.to_string();
+        apply_sub_url_overrides(&mut sub_req, url);
+        let a = p.build_args(&sub_req)?;
+        (bin, a)
+    } else {
+        let p = crate::providers::gallery_dl::GalleryDl;
+        let bin = crate::providers::gallery_dl::GalleryDl::binary()?
+            .to_string_lossy()
+            .into_owned();
+        let mut sub_req = req.clone();
+        sub_req.url = url.to_string();
+        apply_sub_url_overrides(&mut sub_req, url);
+        let a = p.build_args(&sub_req)?;
+        (bin, a)
+    };
     if dry_run {
         args.push(std::ffi::OsString::from("--get-urls"));
         crate::process::Executor::run_inherited_checked(&binary, &args)?;
@@ -601,6 +620,7 @@ profile, or this profile has no videos posted";
     fn base_req() -> ScrapeRequest {
         ScrapeRequest {
             no_archive: false,
+            profile_pic_only: false,
             url: String::new(),
             output: None,
             preset: Some("instagram".to_string()),
