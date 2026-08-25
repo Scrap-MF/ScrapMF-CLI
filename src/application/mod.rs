@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod backend;
 pub mod integrity;
 pub mod runlog;

@@ -42,7 +42,7 @@ pub struct ScrapeOutcome {
     pub challenge_failures: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ScrapeRequest {
     pub url: String,
     pub output: Option<std::path::PathBuf>,
@@ -50,7 +50,12 @@ pub struct ScrapeRequest {
     pub extra_args: Vec<String>,
     pub cookies_from_browser: Option<String>,
     pub cookies_file: Option<std::path::PathBuf>,
+    /// Explicit archive override. When `None`, the automatic per-account
+    /// archive (see `crate::application::archive`) kicks in unless
+    /// [`Self::no_archive`] is set.
     pub archive: Option<std::path::PathBuf>,
+    /// Disable dedup entirely for this request (CLI `--no-archive`).
+    pub no_archive: bool,
     pub rate_limit: Option<crate::config::RateLimit>,
     pub extractor_options: std::collections::HashMap<String, toml::Value>,
     pub filename_template: Option<String>,
@@ -254,13 +259,50 @@ pub fn scrape_with_hooks(
         }
     }
 
+    // ── Download archive (dedup) ────────────────────────────────────────────
+    // Canonical store is ours (JSONL per site/account); the sqlite passed to
+    // gallery-dl is a disposable cache seeded from it before the run and
+    // drained back into the JSONL afterwards.
+    let mut req = req.clone();
+    let mut archive_keys: std::collections::HashSet<String> = Default::default();
+    let mut archive_files: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
+    if !req.no_archive && req.archive.is_none() && !dry_run {
+        use crate::application::archive;
+        let enabled = crate::config::load()
+            .map(|c| c.general.archive)
+            .unwrap_or(true);
+        if enabled
+            && let Some((site, account)) = archive::site_account_from_url(&req.url)
+            && let (Some(entries), Some(cache)) = (
+                archive::entries_path(&site, &account),
+                archive::cache_path(&site, &account),
+            )
+        {
+            archive_keys = archive::load_keys(&entries).unwrap_or_default();
+            match archive::seed_cache(&cache, &archive_keys) {
+                Ok(()) => {
+                    tracing::debug!(
+                        site = %site, account = %account,
+                        keys = archive_keys.len(),
+                        "archive cache seeded"
+                    );
+                    req.archive = Some(cache.clone());
+                    archive_files = Some((entries, cache));
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not seed download archive — proceeding without dedup");
+                }
+            }
+        }
+    }
+
     let mut outcome = ScrapeOutcome::default();
     // Iterate over main url + extra sub-urls (instagram: posts/reels/stories/highlights)
     let urls: Vec<&String> = std::iter::once(&req.url)
         .chain(req.extra_urls.iter())
         .collect();
     for sub_url in urls {
-        match run_one_sub_scrape(req, sub_url, dry_run, hooks.as_deref_mut(), abort) {
+        match run_one_sub_scrape(&req, sub_url, dry_run, hooks.as_deref_mut(), abort) {
             Ok(challenge_failures) => {
                 outcome.success_count += 1;
                 outcome.challenge_failures += challenge_failures;
@@ -303,6 +345,23 @@ pub fn scrape_with_hooks(
         // All failed (no skipped) → propagate error
         let details = outcome.failed.join("; ");
         anyhow::bail!("scrape failed: {details}");
+    }
+
+    // Drain the cache: keys gallery-dl inserted this run become permanent
+    // JSONL entries. Best-effort — a failure here must not fail the scrape.
+    if let Some((entries, cache)) = archive_files {
+        match crate::application::archive::drain_cache(&cache) {
+            Ok(all) => {
+                match crate::application::archive::append_entries(&entries, &archive_keys, all) {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(new_entries = n, "download archive updated");
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "could not append archive entries"),
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "could not read download archive cache"),
+        }
     }
     Ok(outcome)
 }
@@ -506,6 +565,7 @@ profile, or this profile has no videos posted";
 
     fn base_req() -> ScrapeRequest {
         ScrapeRequest {
+            no_archive: false,
             url: String::new(),
             output: None,
             preset: Some("instagram".to_string()),

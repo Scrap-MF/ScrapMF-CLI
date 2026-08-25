@@ -45,6 +45,10 @@ pub enum Commands {
         /// Do not download, only print what would be done
         #[arg(long)]
         dry_run: bool,
+
+        /// Disable the download archive (dedup) for this run
+        #[arg(long)]
+        no_archive: bool,
     },
 
     /// Manage configuration

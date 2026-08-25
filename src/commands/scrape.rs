@@ -9,6 +9,9 @@ use crate::providers::Provider;
 use crate::providers::gallery_dl::GalleryDl;
 
 /// Handle `scrapmf scrape` command — Phase 2-4: validate, resolve preset, execute.
+// CLI flags map 1:1 to parameters; grouping them would only obscure the call
+// site in main.rs.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     url: String,
     output: Option<PathBuf>,
@@ -16,6 +19,7 @@ pub fn run(
     cookies: Option<PathBuf>,
     cookies_from_browser: Option<String>,
     dry_run: bool,
+    no_archive: bool,
     verbose: u8,
 ) -> Result<()> {
     let _ = verbose;
@@ -116,6 +120,7 @@ pub fn run(
         extra_urls: Vec::new(),
         profile_name: None,
         extra_extractor_opts: Vec::new(),
+        no_archive,
     };
 
     // 5. Provider args (gallery-dl is the only backend)

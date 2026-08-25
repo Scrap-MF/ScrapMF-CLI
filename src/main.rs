@@ -68,6 +68,7 @@ fn main() -> Result<()> {
             cookies,
             cookies_from_browser,
             dry_run,
+            no_archive,
         }) => {
             ensure_app_config();
             commands::scrape::run(
@@ -77,6 +78,7 @@ fn main() -> Result<()> {
                 cookies,
                 cookies_from_browser,
                 dry_run,
+                no_archive,
                 cli.verbose,
             )
             .context("scrape command failed")?;

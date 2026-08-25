@@ -72,6 +72,40 @@ pub fn run(verbose: u8) -> Result<()> {
         }
     }
 
+    // Download archive stats (per-account JSONL files)
+    if let Some(archive_dir) =
+        crate::config::config_path().and_then(|p| p.parent().map(|b| b.join("archive")))
+    {
+        let mut files = 0usize;
+        let mut entries = 0usize;
+        if let Ok(rd) = std::fs::read_dir(&archive_dir) {
+            for site in rd.flatten() {
+                let site_path = site.path();
+                if !site_path.is_dir() {
+                    continue;
+                }
+                if let Ok(accounts) = std::fs::read_dir(site_path) {
+                    for acc in accounts.flatten() {
+                        if acc.path().extension().is_some_and(|e| e == "jsonl")
+                            && let Ok(content) = std::fs::read_to_string(acc.path())
+                        {
+                            files += 1;
+                            entries += content.lines().filter(|l| !l.trim().is_empty()).count();
+                        }
+                    }
+                }
+            }
+        }
+        if files == 0 {
+            output::print_info("Download archive: empty (dedup records appear after first scrape)");
+        } else {
+            output::print_success(&format!(
+                "Download archive: {entries} media across {files} account(s) in {}",
+                archive_dir.display()
+            ));
+        }
+    }
+
     // Check temp dir writable
     let test_dir = std::env::temp_dir().join("scrapmf_doctor_test");
     match std::fs::create_dir_all(&test_dir) {
