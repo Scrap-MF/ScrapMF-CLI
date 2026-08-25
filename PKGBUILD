@@ -11,7 +11,7 @@
 # (e.g. ScrapMF-CLI-1.1.0), NOT "$pkgname-$pkgver" — the cd targets below
 # match that naming.
 pkgname=scrapmf
-pkgver=1.1.0
+pkgver=1.2.0
 pkgrel=1
 pkgdesc="Safe, interactive archiver for social media galleries"
 arch=('x86_64')
