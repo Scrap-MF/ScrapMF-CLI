@@ -1,0 +1,40 @@
+name: release-plz
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-plz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # The action authenticates via RELEASE_PLZ_TOKEN (env below);
+          # don't leave the checkout's embedded token on the runner.
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # RELEASE_PLZ_TOKEN must be a PAT with Contents+PullRequests write on
+      # this repo. A PAT (not GITHUB_TOKEN) is required so that the tag push
+      # performed here triggers the ci.yml release job — GitHub ignores
+      # workflow triggers caused by its own default token.
+      # NOTE: MarcoIeni/release-plz-action was renamed/moved and its @v1 tag
+      # no longer resolves anywhere — every run failed at "Set up job".
+      # Current canonical reference per release-plz.dev/docs/github/quickstart.
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}

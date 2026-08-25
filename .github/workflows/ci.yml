@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, develop]
+
+# Consecutive pushes to the same branch supersede older runs — a full gate
+# for a commit we already replaced wastes runner minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Prebuilt binaries — compiling just/nextest/deny from source costs
+      # several minutes per run.
+      - name: Install tools (just · cargo-nextest · cargo-deny)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-nextest,cargo-deny
+
+      # Cache ~/.cargo and target, invalidated by Cargo.lock/rustc changes.
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Mirrors `just quick` — keep recipes in justfile as the single source
+      - name: Quick gate (fmt + clippy + tests)
+        run: just quick
+
+      - name: Build release
+        run: cargo build --release
+
+      # Mirrors the deny part of `just validate`
+      # NOTE: no --all-features flag — removed in cargo-deny 0.18+; the
+      # setting lives in .cargo/deny.toml [graph] now.
+      - name: Security policy (cargo-deny)
+        run: cargo deny --config .cargo/deny.toml check
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: ci
+    # contents:write lets softprops/action-gh-release attach assets
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            cross: false
+          - target: x86_64-unknown-linux-musl
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            cross: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross toolchains
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
+      - name: Install musl tools (x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - name: Build
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            # Rust bundles static musl CRT objects, so the gnu cross-gcc works
+            # as linker for the musl target too.
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc
+          fi
+          cargo build --release --target ${{ matrix.target }} --locked
+      - name: Create archive
+        run: |
+          tar czf scrapmf-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release scrapmf
+          sha256sum scrapmf-${{ matrix.target }}.tar.gz > scrapmf-${{ matrix.target }}.tar.gz.sha256
+      - name: Upload release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            scrapmf-${{ matrix.target }}.tar.gz
+            scrapmf-${{ matrix.target }}.tar.gz.sha256

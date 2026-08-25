@@ -1,0 +1,29 @@
+# release-plz — automated version bumps from Conventional Commits.
+#
+# Flow: push to main → release-plz opens a "chore(release): vX.Y.Z" PR
+# (Cargo.toml + Cargo.lock bump) → merging that PR makes release-plz push
+# the git tag → the existing ci.yml release job builds and publishes binaries.
+#
+# crates.io publication is intentionally disabled; flip `publish` to true
+# when scrapmf is ready for the registry.
+
+[workspace]
+# No CHANGELOG.md by project decision (can be enabled later).
+changelog_update = false
+
+# Our ci.yml release job owns GitHub Release creation — it is the one that
+# attaches the compiled binaries. release-plz only pushes the tag.
+git_release_enable = false
+
+# Uniform branch names for release PRs: release-plz/v1.0.0, …
+pr_branch_prefix = "release-plz"
+
+[[package]]
+name = "scrapmf"
+publish = false
+# git-only mode: determine the current version from GIT TAGS instead of the
+# cargo registry. scrapmf was never published to crates.io, so without this
+# release-plz could not establish a baseline and silently computed
+# "next version 1.0.0 / already up-to-date" no matter how many feat/fix
+# commits landed. With git_only it reads tag `v1.0.0` and bumps correctly.
+git_only = true
