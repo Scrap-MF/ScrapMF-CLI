@@ -40,9 +40,11 @@ pub fn run(yes: bool) -> Result<()> {
         }
     ));
 
-    // aarch64 has no official standalone build → pinned pipx fallback
+    // x86_64 has an official standalone build → direct managed install.
+    // Every other arch (aarch64, armv7, riscv64, …) has none → offer a
+    // pinned pipx/pip install instead of just printing advice.
     if !is_x86_64() {
-        print_pipx_fallback();
+        install_via_python(yes);
         return Ok(());
     }
 
@@ -51,6 +53,158 @@ pub fn run(yes: bool) -> Result<()> {
 
 fn is_x86_64() -> bool {
     matches!(std::env::consts::ARCH, "x86_64")
+}
+
+/// One candidate installer for the pinned gallery-dl on non-x86_64 hosts.
+struct PipInstaller {
+    /// Display name for messages.
+    label: &'static str,
+    /// argv[] used to invoke it (binary + leading args before "install").
+    argv_prefix: &'static [&'static str],
+}
+
+/// Detect usable installers, best first: pipx keeps the version frozen in an
+/// isolated env; python3 -m pip is the universal fallback (Termux, venvs…).
+fn detect_installers() -> Vec<PipInstaller> {
+    let mut out = Vec::new();
+    if which::which("pipx").is_ok() {
+        out.push(PipInstaller {
+            label: "pipx",
+            argv_prefix: &["pipx"],
+        });
+    }
+    let pip_ok = ["python3", "python"]
+        .iter()
+        .any(|py| which::which(py).is_ok());
+    if pip_ok {
+        out.push(PipInstaller {
+            label: "pip",
+            argv_prefix: &["python3", "-m", "pip"],
+        });
+    }
+    out
+}
+
+fn is_termux() -> bool {
+    std::env::var_os("TERMUX_VERSION").is_some()
+        || std::env::var_os("PREFIX").is_some_and(|p| p.to_string_lossy().contains("com.termux"))
+}
+
+/// Offer and run a pinned gallery-dl install through pipx/pip. The installed
+/// binary lands on $PATH, so backend resolution picks it up as
+/// Source::System ("NOT pinned" — the user must resist upgrading it).
+fn install_via_python(yes: bool) {
+    let pin = backend::GALLERY_DL_PIN;
+    let candidates = detect_installers();
+    if candidates.is_empty() {
+        print_python_fallback();
+        return;
+    }
+
+    output::print_info(&format!(
+        "no standalone build for {} — installing pinned gallery-dl via Python instead",
+        std::env::consts::ARCH
+    ));
+    let choice = &candidates[0];
+    let mut cmd = String::new();
+    for (i, part) in choice.argv_prefix.iter().enumerate() {
+        if i > 0 {
+            cmd.push(' ');
+        }
+        cmd.push_str(part);
+    }
+    cmd.push_str(&format!(" install gallery-dl=={pin}"));
+    println!("→ {cmd}");
+
+    if !yes && !confirm("Run this now?") {
+        println!("cancelled — run it manually whenever you like");
+        return;
+    }
+
+    let bin = choice.argv_prefix[0];
+    let mut argv: Vec<std::ffi::OsString> = choice.argv_prefix[1..]
+        .iter()
+        .map(std::ffi::OsString::from)
+        .collect();
+    argv.extend([
+        std::ffi::OsString::from("install"),
+        std::ffi::OsString::from(format!("gallery-dl=={pin}")),
+    ]);
+    match crate::process::Executor::run_capturing(bin, &argv) {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stderr = stderr.lines().rev().take(10).collect::<Vec<_>>();
+            let stderr = stderr.into_iter().rev().collect::<Vec<_>>().join("\n");
+            output::print_error(&format!(
+                "{} install failed:\n{}",
+                choice.label,
+                stderr.trim()
+            ));
+            print_python_fallback();
+            return;
+        }
+        Err(e) => {
+            output::print_error(&format!("could not launch {}: {e}", choice.label));
+            print_python_fallback();
+            return;
+        }
+    }
+    verify_system_install();
+}
+
+/// Post-install sanity check: the binary must be on $PATH now.
+fn verify_system_install() {
+    match crate::application::backend::resolve(None) {
+        source @ (crate::application::backend::Source::System(_)
+        | crate::application::backend::Source::Env(_)) => {
+            let Some(path) = source.path() else {
+                return;
+            };
+            match crate::process::Executor::run_capturing(
+                &path.to_string_lossy(),
+                &[std::ffi::OsString::from("--version")],
+            ) {
+                Ok(out) => {
+                    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    output::print_success(&format!(
+                        "gallery-dl {v} verified working at {}",
+                        path.display()
+                    ));
+                }
+                Err(e) => tracing::warn!(error = %e, "installed binary did not report a version"),
+            }
+            output::print_note(
+                "installed via pip/pipx: scrapmf sees it as system (NOT pinned). \
+                 Avoid upgrading it manually; new pins ship with scrapmf releases.",
+            );
+        }
+        _ => {
+            output::print_note(
+                "install finished but 'gallery-dl' is still not on $PATH — \
+                 open a new shell or add its bin dir to PATH.",
+            );
+        }
+    }
+}
+
+fn print_python_fallback() {
+    let pin = backend::GALLERY_DL_PIN;
+    if is_termux() {
+        output::print_note(
+            "no pip/pipx found — on Termux install Python first, then the pinned backend:",
+        );
+        println!("  pkg install python");
+        println!("  python3 -m pip install gallery-dl=={pin}");
+    } else {
+        output::print_note(
+            "no pipx or python3 found — install one of them, then the pinned version:",
+        );
+        println!("  pipx install gallery-dl=={pin}");
+        println!("  # or:");
+        println!("  python3 -m pip install gallery-dl=={pin}");
+    }
+    output::print_info("  pipx never auto-upgrades it, so the version stays frozen.");
 }
 
 fn install_managed(yes: bool) -> Result<()> {
@@ -103,15 +257,6 @@ fn install_managed(yes: bool) -> Result<()> {
     output::print_info("  It never updates on its own; new pins ship with scrapmf releases.");
     print_version(&target);
     Ok(())
-}
-
-fn print_pipx_fallback() {
-    output::print_note(&format!(
-        "no standalone build for {} — install the pinned version via pipx instead:",
-        std::env::consts::ARCH
-    ));
-    println!("  pipx install --system-site-packages gallery-dl=={GALLERY_DL_PIN}");
-    output::print_info("  pipx never auto-upgrades it, so the version stays frozen.");
 }
 
 fn print_version(path: &Path) {
@@ -221,4 +366,40 @@ fn confirm(question: &str) -> bool {
     let mut answer = String::new();
     let _ = std::io::stdin().read_line(&mut answer);
     matches!(answer.trim(), "" | "y" | "Y" | "yes" | "Yes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Installer detection must always return candidates in priority order:
+    /// pipx (frozen env) before plain pip. On CI/dev machines at least one of
+    /// the two exists; if none does, the list is simply empty.
+    #[test]
+    fn detect_installers_prefers_pipx_over_pip() {
+        let found = detect_installers();
+        if found.len() >= 2 {
+            assert_eq!(found[0].label, "pipx");
+            assert_eq!(found[1].label, "pip");
+        }
+    }
+
+    #[test]
+    fn detect_installers_argv_ends_before_install_subcommand() {
+        for c in detect_installers() {
+            assert!(!c.argv_prefix.contains(&"install"));
+            assert!(!c.argv_prefix.is_empty());
+        }
+    }
+
+    #[test]
+    fn pip_command_string_matches_detected_prefix() {
+        for c in detect_installers() {
+            let mut cmd = c.argv_prefix.join(" ");
+            cmd.push_str(&format!(" install gallery-dl=={GALLERY_DL_PIN}"));
+            assert!(cmd.starts_with(c.argv_prefix[0]));
+            assert!(cmd.ends_with(GALLERY_DL_PIN));
+            assert!(!cmd.contains(';'));
+        }
+    }
 }

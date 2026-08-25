@@ -57,6 +57,11 @@ pub enum Commands {
     Doctor,
 
     /// Install the bundled pinned gallery-dl backend
+    ///
+    /// Hidden from `--help`: the install is offered automatically on first
+    /// interactive run, so the command is only needed as an advanced/manual
+    /// entry point (kept for scripts and recovery).
+    #[command(hide = true)]
     Setup {
         /// Skip the confirmation prompt
         #[arg(long)]

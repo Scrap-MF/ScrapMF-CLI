@@ -40,7 +40,10 @@ pub fn run(verbose: u8) -> Result<()> {
         }
     } else {
         output::print_error("gallery-dl not found in $PATH");
-        output::print_help("run 'scrapmf setup' to install the bundled pinned build automatically");
+        output::print_help(
+            "run scrapmf (interactive) and it will offer to install the pinned backend; \
+             'scrapmf setup' also works",
+        );
         ok = false;
     }
 
