@@ -123,41 +123,43 @@ jobs:
           sudo apt-get install -y musl-tools
       # rusqlite (bundled SQLite) compiles C — musl targets need a real musl
       # cross-gcc or the binary would link glibc and stop being static.
+      # Toolchains from github.com/cross-tools/musl-cross releases (pinned tag,
+      # GitHub-hosted = reliable; musl.cc proved flaky on 2026-08-25).
       - name: Install musl cross toolchain (aarch64)
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: |
           cd /tmp
-          curl -fsSLO https://musl.cc/aarch64-linux-musl-cross.tgz
-          tar xzf aarch64-linux-musl-cross.tgz
-          echo "/tmp/aarch64-linux-musl-cross/bin" >> "$GITHUB_PATH"
+          curl -fsSL --retry 3 -o tc.tar.xz \
+            https://github.com/cross-tools/musl-cross/releases/download/20260823/aarch64-unknown-linux-musl.tar.xz
+          tar xJf tc.tar.xz
+          echo "/tmp/aarch64-unknown-linux-musl/bin" >> "$GITHUB_PATH"
       - name: Install musl cross toolchain (armv7)
         if: matrix.target == 'armv7-unknown-linux-musleabihf'
         run: |
           cd /tmp
-          curl -fsSLO https://musl.cc/armv7l-linux-musleabihf-cross.tgz
-          tar xzf armv7l-linux-musleabihf-cross.tgz
-          echo "/tmp/armv7l-linux-musleabihf-cross/bin" >> "$GITHUB_PATH"
+          curl -fsSL --retry 3 -o tc.tar.xz \
+            https://github.com/cross-tools/musl-cross/releases/download/20260823/armv7-unknown-linux-musleabihf.tar.xz
+          tar xJf tc.tar.xz
+          echo "/tmp/armv7-unknown-linux-musleabihf/bin" >> "$GITHUB_PATH"
       - name: Build
         shell: bash
         run: |
           case "${{ matrix.target }}" in
-            armv7-*)                    export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc
-                                        export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=arm-linux-gnueabihf-gcc ;;
-            aarch64-unknown-linux-*)    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-                                        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc ;;
+            armv7-*)                    export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc ;;
             riscv64gc-*)                export CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc ;;
             powerpc64le-*)              export CARGO_TARGET_POWERPC64LE_UNKNOWN_LINUX_GNU_LINKER=powerpc64le-linux-gnu-gcc ;;
+            aarch64-unknown-linux-gnu)  export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc ;;
           esac
           # cc crate: force musl compilers for static musl targets (SQLite C code)
           case "${{ matrix.target }}" in
             x86_64-unknown-linux-musl)  export CC_x86_64_unknown_linux_musl=musl-gcc
                                         export AR_x86_64_unknown_linux_musl=ar ;;
-            aarch64-unknown-linux-musl) export CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc
-                                        export AR_aarch64_unknown_linux_musl=aarch64-linux-musl-ar
-                                        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc ;;
-            armv7-unknown-linux-musleabihf) export CC_armv7_unknown_linux_musleabihf=armv7l-linux-musleabihf-gcc
-                                        export AR_armv7_unknown_linux_musleabihf=armv7l-linux-musleabihf-ar
-                                        export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=armv7l-linux-musleabihf-gcc ;;
+            aarch64-unknown-linux-musl) export CC_aarch64_unknown_linux_musl=aarch64-unknown-linux-musl-gcc
+                                        export AR_aarch64_unknown_linux_musl=aarch64-unknown-linux-musl-ar
+                                        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-unknown-linux-musl-gcc ;;
+            armv7-unknown-linux-musleabihf) export CC_armv7_unknown_linux_musleabihf=armv7-unknown-linux-musleabihf-gcc
+                                        export AR_armv7_unknown_linux_musleabihf=armv7-unknown-linux-musleabihf-ar
+                                        export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=armv7-unknown-linux-musleabihf-gcc ;;
           esac
           cargo build --release --target ${{ matrix.target }} --locked
       - name: Create archive
