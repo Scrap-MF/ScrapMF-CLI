@@ -14,7 +14,9 @@
 //! without breaking readers (unknown fields are ignored on load).
 //!
 //! Working cache (disposable): `$XDG_DATA_HOME/scrapmf/cache/archive/<site>/<account>.sqlite`
-//! with gallery-dl's schema (`CREATE TABLE archive (file TEXT PRIMARY KEY)`).
+//! with gallery-dl's schema (`CREATE TABLE archive (entry TEXT PRIMARY KEY)`,
+//! column renamed from `file` to `entry` in newer gallery-dl versions; see
+//! `gallery_dl/archive.py` of v1.32.9).
 //! Before each scrape we seed it with our known keys; after each scrape we
 //! drain rows gallery-dl inserted and append them to the JSONL. The cache is
 //! regenerable garbage — deleting it only costs one re-seed.
@@ -177,9 +179,11 @@ pub fn append_entries(
 
 // ─── Sqlite working cache (gallery-dl compatible) ──────────────────────────
 
-/// Seed the cache sqlite with `keys` using gallery-dl's exact schema:
-/// `CREATE TABLE IF NOT EXISTS archive (file TEXT PRIMARY KEY)`.
-/// Creates/overwrites the DB at `path` and its parent dirs.
+/// Seed the cache sqlite with `keys` using gallery-dl's exact schema (v1.32.9):
+/// `CREATE TABLE IF NOT EXISTS archive (entry TEXT PRIMARY KEY) WITHOUT ROWID`.
+/// The column is `entry` — older gallery-dl used `file`, but v1.32.9 queries
+/// `WHERE entry=?` and fails with "no such column: entry" against the old
+/// schema. Creates/overwrites the DB at `path` and its parent dirs.
 pub fn seed_cache(path: &Path, keys: &HashSet<String>) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -189,12 +193,12 @@ pub fn seed_cache(path: &Path, keys: &HashSet<String>) -> anyhow::Result<()> {
     let conn = rusqlite::Connection::open(path)?;
     conn.execute_batch("PRAGMA journal_mode=OFF")?;
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS \"archive\" (file TEXT PRIMARY KEY)",
+        "CREATE TABLE IF NOT EXISTS \"archive\" (entry TEXT PRIMARY KEY) WITHOUT ROWID",
         [],
     )?;
     conn.execute_batch("BEGIN")?;
     {
-        let mut stmt = conn.prepare("INSERT OR IGNORE INTO \"archive\" (file) VALUES (?1)")?;
+        let mut stmt = conn.prepare("INSERT OR IGNORE INTO \"archive\" (entry) VALUES (?1)")?;
         for k in keys {
             stmt.execute([k])?;
         }
@@ -208,7 +212,7 @@ pub fn drain_cache(path: &Path) -> anyhow::Result<HashSet<String>> {
     let conn =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut out = HashSet::new();
-    let mut stmt = conn.prepare("SELECT file FROM \"archive\"")?;
+    let mut stmt = conn.prepare("SELECT entry FROM \"archive\"")?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     for r in rows {
         out.insert(r?);
@@ -308,9 +312,9 @@ mod tests {
         keys.insert("tiktok 222".to_string());
         seed_cache(&path, &keys).unwrap();
 
-        // gallery-dl adds one more during the "run"
+        // gallery-dl adds one more during the "run" (v1.32.9 schema: entry column)
         let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute("INSERT INTO \"archive\" (file) VALUES ('tiktok 333')", [])
+        conn.execute("INSERT INTO \"archive\" (entry) VALUES ('tiktok 333')", [])
             .unwrap();
         drop(conn);
 

@@ -73,6 +73,36 @@ pub(super) fn preview_and_execute(
         return;
     }
 
+    // Pre-flight: verify provider binaries exist before opening the dashboard.
+    // Without this, a missing threadstractormf would fail instantly inside
+    // run_dashboard and appear as "no ejecuta nada".
+    {
+        let mut missing: Vec<String> = Vec::new();
+        for (req, site, _, _) in &requests {
+            let needs_threads = site == "threads"
+                || req.url.contains("threads.com")
+                || req.url.contains("threads.net")
+                || req.extra_urls.iter().any(|u| u.contains("threads.com") || u.contains("threads.net"));
+            if needs_threads && !crate::providers::Provider::is_available(&crate::providers::threadstractor::Threadstractor) {
+                let msg = "threadstractormf not found in PATH — install with: pipx install threadstractormf (or pip install threadstractormf)".to_string();
+                if !missing.contains(&msg) {
+                    missing.push(msg);
+                }
+            } else if !needs_threads && !crate::providers::Provider::is_available(&crate::providers::gallery_dl::GalleryDl) {
+                let msg = "gallery-dl not found — run `scrapmf setup`".to_string();
+                if !missing.contains(&msg) {
+                    missing.push(msg);
+                }
+            }
+        }
+        if !missing.is_empty() {
+            for m in &missing {
+                crate::output::print_error(m);
+            }
+            return;
+        }
+    }
+
     let total = requests.len();
     let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
 
@@ -123,8 +153,9 @@ pub(super) fn preview_and_execute(
                         let rl = runlog.clone();
                         move |line: &str| {
                             rl.borrow_mut().line(line);
-                            // Hide noisy threadstractor header lines from dashboard (keep in runlog)
+                            // Hide noisy threadstractormf header lines from dashboard (keep in runlog)
                             if line.contains("cookies-from-browser=")
+                                || line.contains("threadstractormf @")
                                 || line.contains("threadstractor @")
                                 || line.contains("rate_limit=")
                                 || line.trim() == "posts"
@@ -726,45 +757,82 @@ pub(super) fn prompt_quick_scrape() {
     // Threads: fotos/videos (posts) and profile pic are separate — profile needs --profile-pic-only
     if site_name == "threads" {
         use crate::cli::interactive::content::ContentKind;
-        let has_posts = kinds.contains(&ContentKind::Posts);
+        let has_photos = kinds.contains(&ContentKind::Photos);
+        let has_videos = kinds.contains(&ContentKind::Videos);
         let has_profile = kinds.contains(&ContentKind::Profile);
-        // If user selected All (both), create two jobs
-        if has_posts || has_profile {
+        let is_all = has_photos && has_videos && has_profile;
+        if has_photos || has_videos || has_profile {
             let mut jobs = Vec::new();
-            if has_posts {
-                let req_posts = base_req(
-                    directory_template.clone(),
-                    Vec::new(),
-                    extra_urls.clone(),
-                    username.clone(),
-                );
+            if is_all {
+                // All: single job, threadstractor will download the carousel once and split into photos/videos/profile siblings
+                // Use user root as base (e.g. ~/scrapmf/example_user), Python will create the three subfolders
+                let all_dirs = flatten_quick_dirs(vec!["{scrapmf_root}".to_string()], &username);
+                let req_all = base_req(Some(all_dirs), Vec::new(), extra_urls.clone(), username.clone());
                 jobs.push((
-                    req_posts,
+                    req_all,
                     site_name.clone(),
-                    format!("{username} (posts)"),
-                    "posts".to_string(),
+                    format!("{username} (all)"),
+                    "all".to_string(),
                 ));
-            }
-            if has_profile {
-                // Profile pic uses its own directory (profile) and flag — flattened like posts
-                let profile_dirs = flatten_quick_dirs(
-                    vec![
-                        "{scrapmf_root}".to_string(),
-                        "{category}".to_string(),
-                        "{username}".to_string(),
+            } else {
+                if has_photos {
+                    let photos_dirs = flatten_quick_dirs(
+                        vec![
+                            "{scrapmf_root}".to_string(),
+                            "{category}".to_string(),
+                            "{username}".to_string(),
+                            "photos".to_string(),
+                        ],
+                        &username,
+                    );
+                    let mut req_photos = base_req(Some(photos_dirs), Vec::new(), extra_urls.clone(), username.clone());
+                    req_photos.extra_args.push("--photos-only".to_string());
+                    jobs.push((
+                        req_photos,
+                        site_name.clone(),
+                        format!("{username} (photos)"),
+                        "photos".to_string(),
+                    ));
+                }
+                if has_videos {
+                    let videos_dirs = flatten_quick_dirs(
+                        vec![
+                            "{scrapmf_root}".to_string(),
+                            "{category}".to_string(),
+                            "{username}".to_string(),
+                            "videos".to_string(),
+                        ],
+                        &username,
+                    );
+                    let mut req_videos = base_req(Some(videos_dirs), Vec::new(), extra_urls.clone(), username.clone());
+                    req_videos.extra_args.push("--videos-only".to_string());
+                    jobs.push((
+                        req_videos,
+                        site_name.clone(),
+                        format!("{username} (videos)"),
+                        "videos".to_string(),
+                    ));
+                }
+                if has_profile {
+                    let profile_dirs = flatten_quick_dirs(
+                        vec![
+                            "{scrapmf_root}".to_string(),
+                            "{category}".to_string(),
+                            "{username}".to_string(),
+                            "profile".to_string(),
+                        ],
+                        &username,
+                    );
+                    let mut req_profile =
+                        base_req(Some(profile_dirs), Vec::new(), Vec::new(), username.clone());
+                    req_profile.profile_pic_only = true;
+                    jobs.push((
+                        req_profile,
+                        site_name.clone(),
+                        format!("{username} (profile)"),
                         "profile".to_string(),
-                    ],
-                    &username,
-                );
-                let mut req_profile =
-                    base_req(Some(profile_dirs), Vec::new(), Vec::new(), username.clone());
-                req_profile.profile_pic_only = true;
-                jobs.push((
-                    req_profile,
-                    site_name.clone(),
-                    format!("{username} (profile)"),
-                    "profile".to_string(),
-                ));
+                    ));
+                }
             }
             // Per-run cookie override
             if std::io::IsTerminal::is_terminal(&std::io::stdout())

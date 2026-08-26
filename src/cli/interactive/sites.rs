@@ -508,25 +508,13 @@ fn import_from_paste_flow(default_name: &str) {
 
 pub(super) fn site_submenu(name: &str, dir: &Path) {
     let path = dir.join(format!("{name}.toml"));
-    let is_instagram = name == "instagram";
     loop {
         clear_screen();
-        let mut options: Vec<String> = vec!["Edit".to_string()];
-        if is_instagram {
-            let enabled = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| toml::from_str::<crate::config::Site>(&s).ok())
-                .and_then(|site| site.dedup_stories_from_highlights)
-                .unwrap_or(false);
-            let label = if enabled {
-                "Dedup stories from highlights: enabled"
-            } else {
-                "Dedup stories from highlights: disabled"
-            };
-            options.push(label.to_string());
-        }
-        options.push("Delete site".to_string());
-        options.push("Back".to_string());
+        let options: Vec<String> = vec![
+            "Edit".to_string(),
+            "Delete site".to_string(),
+            "Back".to_string(),
+        ];
         let choice = match select_menu(&format!("Site: {name}"), options).prompt() {
             Ok(c) => c,
             Err(_) => return,
@@ -538,37 +526,6 @@ pub(super) fn site_submenu(name: &str, dir: &Path) {
                 eprintln!("error: {name}.toml no longer exists");
                 return;
             }
-        } else if choice.starts_with("Dedup stories from highlights:") {
-            let current = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| toml::from_str::<crate::config::Site>(&s).ok())
-                .and_then(|site| site.dedup_stories_from_highlights)
-                .unwrap_or(false);
-            let new_val = !current;
-            match std::fs::read_to_string(&path) {
-                Ok(raw) => match toml::from_str::<crate::config::Site>(&raw) {
-                    Ok(mut site) => {
-                        site.dedup_stories_from_highlights = Some(new_val);
-                        match toml::to_string_pretty(&site) {
-                            Ok(body) => {
-                                let header = "# scrapmf — site config — instagram\n# dedup_stories_from_highlights: when true, stories already saved in highlights (same media_id) are skipped via archive\n\n";
-                                let content = format!("{header}{body}\n");
-                                match crate::config::fs::write_config_file(&path, &content) {
-                                    Ok(()) => println!(
-                                        "✔ dedup stories from highlights {}",
-                                        if new_val { "enabled" } else { "disabled" }
-                                    ),
-                                    Err(e) => println!("✖ save failed: {e}"),
-                                }
-                            }
-                            Err(e) => println!("✖ serialize failed: {e}"),
-                        }
-                    }
-                    Err(e) => println!("✖ parse failed: {e}"),
-                },
-                Err(e) => println!("✖ read failed: {e}"),
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1000));
         } else if choice == "Delete site" {
             if Confirm::new(&format!("Delete {name}.toml?"))
                 .with_render_config(render_config())

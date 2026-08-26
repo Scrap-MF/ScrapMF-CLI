@@ -47,6 +47,19 @@ pub fn run(verbose: u8) -> Result<()> {
         ok = false;
     }
 
+    // Check threadstractormf (Threads provider)
+    {
+        let threads = crate::providers::threadstractor::Threadstractor;
+        if threads.is_available() {
+            // try to get --help exit code as liveness check (no --version flag)
+            output::print_success("threadstractormf found (Threads provider)");
+        } else {
+            output::print_info(
+                "threadstractormf not found — Threads downloads will fail. Install with: pipx install threadstractormf",
+            );
+        }
+    }
+
     // Check browsers for cookies
     let browsers = detect_available_browsers();
     let available: Vec<_> = browsers.iter().filter(|b| b.available).collect();

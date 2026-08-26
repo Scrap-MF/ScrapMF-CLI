@@ -96,10 +96,6 @@ pub struct Site {
     #[serde(default)]
     pub rate_limit: Option<RateLimit>,
     pub archive: Option<PathBuf>,
-    /// When true (instagram only), stories whose `media_id` already exists in
-    /// highlights are skipped. Requires the download archive.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dedup_stories_from_highlights: Option<bool>,
     #[serde(default)]
     pub extractor: HashMap<String, toml::Value>,
     pub filename_template: Option<String>,

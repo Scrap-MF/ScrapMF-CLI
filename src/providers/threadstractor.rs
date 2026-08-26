@@ -10,35 +10,35 @@ pub struct Threadstractor;
 
 impl Threadstractor {
     pub fn binary() -> anyhow::Result<PathBuf> {
-        // Try threadstractor in PATH (pipx / uv / pip --user)
-        // Falls back to python -m threadstractor if binary not found
-        if let Ok(path) = which::which("threadstractor") {
+        // Try threadstractormf in PATH (pipx / uv / pip --user)
+        // Falls back to python -m threadstractormf if binary not found
+        if let Ok(path) = which::which("threadstractormf") {
             return Ok(path);
         }
         anyhow::bail!(
-            "threadstractor binary not found in PATH. Install with: uv pip install -e ../python-proyect  or pip install threadstractor"
+            "threadstractormf binary not found in PATH. Install with: pipx install threadstractormf  or  pip install threadstractormf  or  uv pip install -e ../python-proyect"
         )
     }
 
     fn binary_with_fallback() -> (String, Vec<OsString>) {
-        if let Ok(path) = which::which("threadstractor") {
+        if let Ok(path) = which::which("threadstractormf") {
             return (path.to_string_lossy().into_owned(), vec![]);
         }
-        // Fallback: python -m threadstractor
+        // Fallback: python -m threadstractormf
         (
             String::from("python"),
-            vec![OsString::from("-m"), OsString::from("threadstractor")],
+            vec![OsString::from("-m"), OsString::from("threadstractormf")],
         )
     }
 }
 
 impl Provider for Threadstractor {
     fn name(&self) -> &str {
-        "threadstractor"
+        "threadstractormf"
     }
 
     fn is_available(&self) -> bool {
-        which::which("threadstractor").is_ok()
+        which::which("threadstractormf").is_ok()
     }
 
     fn version(&self) -> anyhow::Result<String> {

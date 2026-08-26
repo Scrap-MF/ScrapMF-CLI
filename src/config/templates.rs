@@ -67,8 +67,12 @@ pub fn ensure_example_sites() -> anyhow::Result<()> {
         toml::Value::Table(highlight_table),
     );
     // Instagram stories (ephemeral 24h): date-based tree, all lowercase
-    //   instagram/stories/{year}/{month-lowercase}/{post_id}_{num}.{ext}
-    //   e.g. example_user/instagram/stories/2026/10-october/18019785941702276_01.mp4
+    //   instagram/stories/{year}/{month-lowercase}/{date}_{num}.{ext}
+    //   e.g. example_user/instagram/stories/2026/10-october/2026-10-28_01.mp4
+    // NOTE: stories filename uses {date} + tray position ({num}) — NOT
+    // {post_id}/{media_id}: for stories both are stable per user, so two
+    // different days computed identical names and existing files silently
+    // skipped the new day's stories (false dedup).
     // gallery-dl strftime cannot lowercase %B natively; use f-string formatter prefix
     // `\fF` (\f = form feed escape in JSON value, F = FStringFormatter) with Python strftime:
     //   "\fF {date.strftime(\"%m-%B\").lower()}" → "10-october"
@@ -93,7 +97,7 @@ pub fn ensure_example_sites() -> anyhow::Result<()> {
     );
     stories_table.insert(
         "filename".to_string(),
-        toml::Value::String("{post_id}_{num:02d}.{extension}".to_string()),
+        toml::Value::String("{date:%Y-%m-%d}_{num:02d}.{extension}".to_string()),
     );
     extractor.insert(
         "instagram:stories".to_string(),
@@ -138,7 +142,6 @@ pub fn ensure_example_sites() -> anyhow::Result<()> {
             limit_rate: None,
         }),
         archive: None,
-        dedup_stories_from_highlights: None,
         extractor,
         // Naming: posts/reels → post_id, stories/highlights inner → media_id, date %Y-%m-%d verified via gallery-dl -K
         // _num:02d preserves carrousel order (01,02,03) with _ separator (only for posts/reels, NOT highlights)
@@ -203,7 +206,6 @@ pub fn ensure_example_sites() -> anyhow::Result<()> {
 #     By default scrapmf keeps its own per-account download archive in
 #     ~/.config/scrapmf/archive/<site>/<account>.jsonl — dedup is automatic;
 #     disable with [general] archive = false or `scrapmf scrape --no-archive`.
-#   dedup_stories_from_highlights = true  # instagram only: if a story media_id already exists in highlights, skip it (requires archive)
 #   extra_args = ["--restrict-filenames", "auto", "--proxy", "http://..."]  # allow-list: --proxy, --user-agent, --sleep, --sleep-request, --sleep-429, --limit-rate, --cookies, --cookies-from-browser, --restrict-filenames, --destination, --get-urls (--exec forbidden; ;|&$><` rejected)
 #   filename_template = "{date:%Y-%m-%d}_{post_id}_{num:02d}.{extension}"  # → gallery-dl -o filename= (date first; _num:02d preserves carrousel order 01,02,03)
 #   directory_template = ["{scrapmf_root}", "{category}", "{username}", "{subcategory}"]  # → PERFIL/instagram/CUENTA/posts
@@ -330,7 +332,6 @@ pub fn ensure_tiktok_site() -> anyhow::Result<()> {
             limit_rate: None,
         }),
         archive: None,
-        dedup_stories_from_highlights: None,
         extractor,
         filename_template: None,
         directory_template: None,
@@ -473,7 +474,6 @@ pub fn ensure_twitter_site() -> anyhow::Result<()> {
             limit_rate: None,
         }),
         archive: None,
-        dedup_stories_from_highlights: None,
         extractor,
         filename_template: None,
         directory_template: None,
@@ -575,7 +575,6 @@ pub fn ensure_vsco_site() -> anyhow::Result<()> {
             limit_rate: None,
         }),
         archive: None,
-        dedup_stories_from_highlights: None,
         extractor,
         filename_template: None,
         directory_template: None,
@@ -631,7 +630,6 @@ pub fn ensure_threads_site() -> anyhow::Result<()> {
             limit_rate: None,
         }),
         archive: None,
-        dedup_stories_from_highlights: None,
         extractor: std::collections::HashMap::new(),
         // Default chronological: date first (like instagram) — user can override
         // to "{post_id}_{num:02d}.{extension}" or "{post_id}_{date:%Y-%m-%d}_{num:02d}..."

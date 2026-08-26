@@ -57,7 +57,7 @@ pub(super) fn content_options(site: &str) -> Vec<&'static str> {
         "twitter" => vec!["All", "Media", "Profile"],
         // vsco: photos AND videos share the gallery folder (single pass)
         "vsco" => vec!["All", "Media", "Profile"],
-        "threads" => vec!["All", "Posts", "Profile"],
+        "threads" => vec!["All", "Photos", "Videos", "Profile"],
         _ => vec!["All", "Posts"],
     }
 }
@@ -118,7 +118,11 @@ pub(super) fn build_tagged_urls(site: &str, username: &str) -> Vec<(ContentKind,
     match site {
         "threads" => vec![
             (
-                ContentKind::Posts,
+                ContentKind::Photos,
+                format!("https://www.threads.com/@{username}"),
+            ),
+            (
+                ContentKind::Videos,
                 format!("https://www.threads.com/@{username}"),
             ),
             (
@@ -526,7 +530,10 @@ mod tests {
         );
         assert_eq!(content_options("twitter"), vec!["All", "Media", "Profile"]);
         assert_eq!(content_options("vsco"), vec!["All", "Media", "Profile"]);
-        assert_eq!(content_options("threads"), vec!["All", "Posts", "Profile"]);
+        assert_eq!(
+            content_options("threads"),
+            vec!["All", "Photos", "Videos", "Profile"]
+        );
         assert_eq!(content_options("unknown"), vec!["All", "Posts"]);
     }
 

@@ -138,6 +138,8 @@ const ALLOW_LIST: &[&str] = &[
     "--restrict-filenames",
     "--destination",
     "--get-urls",
+    "--photos-only",
+    "--videos-only",
     // Download robustness (flaky CDNs, large videos): retry/timeout tuning
     "--retries",
     "--http-timeout",
@@ -299,37 +301,8 @@ pub fn scrape_with_hooks(
     }
 
     let mut outcome = ScrapeOutcome::default();
-    // Instagram: when dedup_stories_from_highlights is true, run highlights
-    // before stories so the archive already contains highlight media_ids
-    // and stories with the same media_id are skipped automatically.
-    let urls: Vec<&String> = {
-        let mut v: Vec<&String> = std::iter::once(&req.url)
-            .chain(req.extra_urls.iter())
-            .collect();
-        let dedup_enabled = crate::config::load()
-            .ok()
-            .and_then(|cfg| {
-                crate::config::resolve_site(&req.url, req.preset.as_deref(), &cfg)
-                    .map(|(_, s)| s.dedup_stories_from_highlights.unwrap_or(false))
-            })
-            .unwrap_or(false);
-        if dedup_enabled
-            && v.iter().any(|u| is_highlights_url(u))
-            && v.iter().any(|u| is_stories_url(u))
-        {
-            v.sort_by_key(|u| {
-                if is_highlights_url(u) {
-                    0
-                } else if is_stories_url(u) {
-                    2
-                } else {
-                    1
-                }
-            });
-            tracing::debug!("dedup_stories_from_highlights: reordered highlights before stories");
-        }
-        v
-    };
+    let urls: Vec<&String> =
+        std::iter::once(&req.url).chain(req.extra_urls.iter()).collect();
     for sub_url in urls {
         match run_one_sub_scrape(&req, sub_url, dry_run, hooks.as_deref_mut(), abort) {
             Ok(challenge_failures) => {
@@ -456,14 +429,6 @@ pub fn is_instagram_posts_pass(url: &str) -> bool {
     let path = path.split(['?', '#']).next().unwrap_or(path);
     let seg = path.trim_end_matches('/');
     !seg.is_empty() && !seg.contains('/')
-}
-
-pub fn is_highlights_url(url: &str) -> bool {
-    url.contains("highlights")
-}
-
-pub fn is_stories_url(url: &str) -> bool {
-    url.contains("/stories/") && !is_highlights_url(url)
 }
 
 /// Per-sub-url overrides applied right before building argv.
