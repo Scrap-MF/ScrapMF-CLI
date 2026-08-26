@@ -124,12 +124,7 @@ fn row_prefix(mode: Mode, is_cursor: bool, is_checked: bool) -> String {
 
 // ─── TUI ────────────────────────────────────────────────────────────────────
 
-fn run_browser(
-    title: &str,
-    entries: &[Entry],
-    mode: Mode,
-    prechecked: &[usize],
-) -> Outcome {
+fn run_browser(title: &str, entries: &[Entry], mode: Mode, prechecked: &[usize]) -> Outcome {
     let fallback = || match mode {
         Mode::Single => Outcome::Quit,
         Mode::Multi => Outcome::Toggled(vec![]),
