@@ -10,25 +10,14 @@ pub struct Threadstractor;
 
 impl Threadstractor {
     pub fn binary() -> anyhow::Result<PathBuf> {
-        // Try threadstractormf in PATH (pipx / uv / pip --user)
-        // Falls back to python -m threadstractormf if binary not found
-        if let Ok(path) = which::which("threadstractormf") {
-            return Ok(path);
-        }
-        anyhow::bail!(
-            "threadstractormf binary not found in PATH. Install with: pipx install threadstractormf  or  pip install threadstractormf  or  uv pip install -e ../python-proyect"
-        )
+        // Resolution order (mirrors gallery-dl backend): env override >
+        // managed plugin venv > PATH. Error carries actionable hints.
+        crate::plugins::resolve_binary()
     }
 
-    fn binary_with_fallback() -> (String, Vec<OsString>) {
-        if let Ok(path) = which::which("threadstractormf") {
-            return (path.to_string_lossy().into_owned(), vec![]);
-        }
-        // Fallback: python -m threadstractormf
-        (
-            String::from("python"),
-            vec![OsString::from("-m"), OsString::from("threadstractormf")],
-        )
+    fn binary_with_fallback() -> anyhow::Result<(String, Vec<OsString>)> {
+        let path = Self::binary()?;
+        Ok((path.to_string_lossy().into_owned(), vec![]))
     }
 }
 
@@ -38,11 +27,11 @@ impl Provider for Threadstractor {
     }
 
     fn is_available(&self) -> bool {
-        which::which("threadstractormf").is_ok()
+        crate::plugins::threads_enabled()
     }
 
     fn version(&self) -> anyhow::Result<String> {
-        let (bin, prefix) = Self::binary_with_fallback();
+        let (bin, prefix) = Self::binary_with_fallback()?;
         let mut args = prefix;
         args.push(OsString::from("--help"));
         let output = crate::process::Executor::run_capturing(&bin, &args)?;

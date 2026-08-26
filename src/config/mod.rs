@@ -222,6 +222,13 @@ pub fn save(cfg: &Config) -> anyhow::Result<()> {
     write_config_file(&path, &content)
 }
 
+/// Load, mutate in place, and persist the main config.
+pub fn update(f: impl FnOnce(&mut Config)) -> anyhow::Result<()> {
+    let mut cfg = load().unwrap_or_default();
+    f(&mut cfg);
+    save(&cfg)
+}
+
 /// Config file path (XDG)
 pub fn config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|p| p.join("scrapmf/config.toml"))

@@ -91,7 +91,7 @@ pub(super) fn preview_and_execute(
                     &crate::providers::threadstractor::Threadstractor,
                 )
             {
-                let msg = "threadstractormf not found in PATH — install with: pipx install threadstractormf (or pip install threadstractormf)".to_string();
+                let msg = "threads plugin is not enabled — enable it in scrapmf → Plugins (installs threadstractormf)".to_string();
                 if !missing.contains(&msg) {
                     missing.push(msg);
                 }
@@ -618,6 +618,11 @@ pub(super) fn site_options_with_fallbacks(fallbacks: &[&str]) -> Vec<String> {
         if !opts.iter().any(|s| s == fb) {
             opts.push((*fb).to_string());
         }
+    }
+    // Plugin gating: sites backed by an optional provider only appear when
+    // the plugin is installed and enabled (threads → threadstractormf).
+    if !crate::plugins::threads_enabled() {
+        opts.retain(|s| s != "threads");
     }
     opts.sort();
     opts

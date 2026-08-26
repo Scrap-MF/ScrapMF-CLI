@@ -5,7 +5,6 @@ use anyhow::{Context, Result};
 
 use crate::application::scraper::{ScrapeRequest, validate_output_path, validate_url};
 use crate::config;
-use crate::providers::Provider;
 use crate::providers::gallery_dl::GalleryDl;
 
 /// Handle `scrapmf scrape` command — Phase 2-4: validate, resolve preset, execute.
@@ -125,8 +124,13 @@ pub fn run(
         profile_pic_only,
     };
 
-    // 5. Provider args (gallery-dl is the only backend)
-    let provider = GalleryDl;
+    // 5. Provider args (gallery-dl, or the threads plugin for threads URLs)
+    let provider: Box<dyn crate::providers::Provider> =
+        if crate::application::scraper::is_threads_url(&req.url) {
+            Box::new(crate::providers::threadstractor::Threadstractor)
+        } else {
+            Box::new(GalleryDl)
+        };
     let args = provider
         .build_args(&req)
         .context("failed to build provider args")?;

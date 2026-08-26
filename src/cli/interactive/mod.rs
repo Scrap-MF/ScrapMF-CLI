@@ -49,7 +49,13 @@ pub fn run() {
     clear_screen();
 
     loop {
-        let options = vec!["Scrape", "Configuration", "Doctor — check backends", "Exit"];
+        let options = vec![
+            "Scrape",
+            "Configuration",
+            "Plugins",
+            "Doctor — check backends",
+            "Exit",
+        ];
         let choice = match select_menu("What do you want to do?", options).prompt() {
             Ok(c) => c,
             Err(InquireError::OperationCanceled) => {
@@ -91,6 +97,10 @@ pub fn run() {
                 configuration_submenu();
                 clear_screen();
             }
+            "Plugins" => {
+                plugins_menu::menu();
+                clear_screen();
+            }
             "Doctor — check backends" => {
                 let _ = crate::commands::doctor::run(1);
                 // brief pause to see doctor output before clear
@@ -114,6 +124,7 @@ use scrape_flow::prompt_quick_scrape;
 use sites::configuration_submenu;
 
 mod content;
+pub(crate) mod plugins_menu;
 mod profiles;
 mod scrape_flow;
 mod sites;

@@ -4,6 +4,7 @@ pub mod commands;
 pub mod config;
 pub mod error;
 pub mod output;
+pub mod plugins;
 pub mod process;
 pub mod providers;
 pub mod ui;

@@ -565,6 +565,10 @@ pub(super) fn manage_sites() {
             }
         }
         entries.sort();
+        // Plugin gating: plugin-backed sites only show when enabled.
+        if !crate::plugins::threads_enabled() {
+            entries.retain(|n| n != "threads");
+        }
         use crate::cli::interactive::theme::SiteItem;
         let mut options: Vec<SiteItem> = vec![SiteItem::new("Create new site")];
         options.extend(entries.iter().map(|e| SiteItem::new(e.clone())));

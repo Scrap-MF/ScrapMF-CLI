@@ -39,7 +39,8 @@ fn ensure_app_config() {
         ("tiktok site", scrapmf::config::ensure_tiktok_site),
         ("twitter site", scrapmf::config::ensure_twitter_site),
         ("vsco site", scrapmf::config::ensure_vsco_site),
-        ("threads site", scrapmf::config::ensure_threads_site),
+        // NOTE: the threads site template is NOT created at startup — it is
+        // plugin-backed and `plugins::install()` creates it on Enable.
         ("site highlights migration", || {
             scrapmf::config::migrate_all_sites_highlights().map(|_: usize| ())
         }),

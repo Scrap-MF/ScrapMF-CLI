@@ -450,7 +450,7 @@ fn apply_sub_url_overrides(req: &mut ScrapeRequest, url: &str) {
     }
 }
 
-fn is_threads_url(url: &str) -> bool {
+pub fn is_threads_url(url: &str) -> bool {
     url.contains("threads.com") || url.contains("threads.net")
 }
 
@@ -461,8 +461,15 @@ fn run_one_sub_scrape(
     hooks: Option<&mut ScrapeHooks>,
     abort: &std::sync::atomic::AtomicBool,
 ) -> anyhow::Result<usize> {
-    // Pick provider like gallery-dl: threads URLs go to threadstractor
+    // Pick provider like gallery-dl: threads URLs go to the threads plugin
     let is_threads = is_threads_url(url);
+    if is_threads && !crate::plugins::threads_enabled() {
+        anyhow::bail!(
+            "threads plugin is not enabled — this URL needs it. \
+             Enable via scrapmf → Plugins (installs threadstractormf {})",
+            crate::plugins::THREADSTRACTOR_PIN
+        );
+    }
     let (binary, mut args) = if is_threads {
         let p = crate::providers::threadstractor::Threadstractor;
         let bin = crate::providers::threadstractor::Threadstractor::binary()?

@@ -47,16 +47,23 @@ pub fn run(verbose: u8) -> Result<()> {
         ok = false;
     }
 
-    // Check threadstractormf (Threads provider)
+    // Check threadstractormf via the plugins system
     {
-        let threads = crate::providers::threadstractor::Threadstractor;
-        if threads.is_available() {
-            // try to get --help exit code as liveness check (no --version flag)
-            output::print_success("threadstractormf found (Threads provider)");
-        } else {
-            output::print_info(
-                "threadstractormf not found — Threads downloads will fail. Install with: pipx install threadstractormf",
-            );
+        use crate::plugins::PluginState;
+        match crate::plugins::threads_state() {
+            PluginState::Enabled(v) => {
+                output::print_success(&format!("plugins: threads enabled (threadstractormf {v})"));
+            }
+            PluginState::Disabled => {
+                output::print_info(
+                    "plugins: threads disabled — re-enable in scrapmf → Plugins (files kept)",
+                );
+            }
+            PluginState::NotInstalled => {
+                output::print_info(
+                    "plugins: threads not installed — optional; enable in scrapmf → Plugins",
+                );
+            }
         }
     }
 

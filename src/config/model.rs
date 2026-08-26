@@ -9,12 +9,24 @@ pub struct Config {
     pub general: General,
     #[serde(default)]
     pub backend: Backend,
+    #[serde(default)]
+    pub plugins: Plugins,
     #[serde(default, skip_serializing)]
     pub presets: HashMap<String, Preset>,
     #[serde(default, skip_serializing)]
     pub sites: HashMap<String, Site>,
     #[serde(default, skip_serializing)]
     pub profiles: HashMap<String, Profile>,
+}
+
+/// Optional site-provider plugins (see `crate::plugins`). Files live under
+/// `$XDG_DATA_HOME/scrapmf/plugins/`; this section only carries user toggles.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Plugins {
+    /// threads plugin manually disabled from the Plugins menu while keeping
+    /// its installed files (re-enable without re-downloading).
+    #[serde(default)]
+    pub threads_disabled: bool,
 }
 
 /// Backend resolution overrides. By default scrapmf uses its own bundled,
