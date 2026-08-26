@@ -100,7 +100,7 @@ fn status_short(id: &str) -> String {
     match state_for_id(id) {
         PluginState::NotInstalled => "not installed".to_string(),
         PluginState::Disabled => "disabled".to_string(),
-        PluginState::Enabled(v) => format!("enabled v{v}"),
+        PluginState::Enabled(v) => format!("enabled {v}"),
     }
 }
 
