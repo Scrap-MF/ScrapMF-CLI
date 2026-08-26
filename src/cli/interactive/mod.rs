@@ -109,8 +109,7 @@ pub fn run() {
                 clear_screen();
             }
             Action::Doctor => {
-                let _ = crate::commands::doctor::run(1);
-                std::thread::sleep(std::time::Duration::from_millis(800));
+                doctor_view::show();
                 clear_screen();
             }
             Action::Exit => {
@@ -127,6 +126,7 @@ use sites::configuration_submenu;
 
 pub(crate) mod browser;
 mod content;
+pub(crate) mod doctor_view;
 pub(crate) mod home;
 pub(crate) mod plugins_menu;
 mod profiles;

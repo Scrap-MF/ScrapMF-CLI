@@ -5,11 +5,23 @@ use crate::output;
 use crate::providers::gallery_dl::GalleryDl;
 use crate::providers::{Provider, browser::detect_available_browsers};
 
-pub fn run(verbose: u8) -> Result<()> {
-    tracing::debug!(verbose = verbose, "doctor start");
-    println!("scrapmf doctor — checking backends and system");
-    println!("─────────────────────────────────────────────");
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Level {
+    Success,
+    Info,
+    Error,
+    Help,
+}
 
+#[derive(Debug, Clone)]
+pub struct CheckLine {
+    pub level: Level,
+    pub text: String,
+}
+
+/// Collect all checks as structured lines (used by both CLI and TUI).
+pub fn collect(verbose: u8) -> (Vec<CheckLine>, bool) {
+    let mut out: Vec<CheckLine> = Vec::new();
     let mut ok = true;
 
     // Check gallery-dl (resolved source: bundled pinned > overrides > system)
@@ -23,27 +35,35 @@ pub fn run(verbose: u8) -> Result<()> {
     );
     if gallery.is_available() {
         match gallery.version() {
-            Ok(v) if !v.is_empty() => output::print_success(&format!(
-                "gallery-dl {v} found [{}]{}",
-                source.label(),
-                if matches!(source, crate::application::backend::Source::Managed(_)) {
-                    format!(" pinned v{}", crate::application::backend::GALLERY_DL_PIN)
-                } else {
-                    String::new()
-                }
-            )),
+            Ok(v) if !v.is_empty() => out.push(CheckLine {
+                level: Level::Success,
+                text: format!(
+                    "gallery-dl {v} found [{}]{}",
+                    source.label(),
+                    if matches!(source, crate::application::backend::Source::Managed(_)) {
+                        format!(" pinned v{}", crate::application::backend::GALLERY_DL_PIN)
+                    } else {
+                        String::new()
+                    }
+                ),
+            }),
             Ok(_) | Err(_) => {
-                // Binary exists but --version failed or printed nothing
-                output::print_error("gallery-dl found but --version failed");
+                out.push(CheckLine {
+                    level: Level::Error,
+                    text: "gallery-dl found but --version failed".to_string(),
+                });
                 ok = false;
             }
         }
     } else {
-        output::print_error("gallery-dl not found in $PATH");
-        output::print_help(
-            "run scrapmf (interactive) and it will offer to install the pinned backend; \
-             'scrapmf setup' also works",
-        );
+        out.push(CheckLine {
+            level: Level::Error,
+            text: "gallery-dl not found in $PATH".to_string(),
+        });
+        out.push(CheckLine {
+            level: Level::Help,
+            text: "run scrapmf (interactive) and it will offer to install the pinned backend; 'scrapmf setup' also works".to_string(),
+        });
         ok = false;
     }
 
@@ -51,19 +71,20 @@ pub fn run(verbose: u8) -> Result<()> {
     {
         use crate::plugins::PluginState;
         match crate::plugins::threads_state() {
-            PluginState::Enabled(v) => {
-                output::print_success(&format!("plugins: threads enabled (threadstractormf {v})"));
-            }
-            PluginState::Disabled => {
-                output::print_info(
-                    "plugins: threads disabled — re-enable in scrapmf → Plugins (files kept)",
-                );
-            }
-            PluginState::NotInstalled => {
-                output::print_info(
-                    "plugins: threads not installed — optional; enable in scrapmf → Plugins",
-                );
-            }
+            PluginState::Enabled(v) => out.push(CheckLine {
+                level: Level::Success,
+                text: format!("plugins: threads enabled (threadstractormf {v})"),
+            }),
+            PluginState::Disabled => out.push(CheckLine {
+                level: Level::Info,
+                text: "plugins: threads disabled — re-enable in scrapmf → Plugins (files kept)"
+                    .to_string(),
+            }),
+            PluginState::NotInstalled => out.push(CheckLine {
+                level: Level::Info,
+                text: "plugins: threads not installed — optional; enable in scrapmf → Plugins"
+                    .to_string(),
+            }),
         }
     }
 
@@ -71,16 +92,23 @@ pub fn run(verbose: u8) -> Result<()> {
     let browsers = detect_available_browsers();
     let available: Vec<_> = browsers.iter().filter(|b| b.available).collect();
     if available.is_empty() {
-        output::print_info(
-            "No browser cookie DBs detected (checked: firefox, brave, chrome, chromium, edge, opera, vivaldi)",
-        );
+        out.push(CheckLine {
+            level: Level::Info,
+            text: "No browser cookie DBs detected (checked: firefox, brave, chrome, chromium, edge, opera, vivaldi)".to_string(),
+        });
         for b in &browsers {
             tracing::debug!(browser = %b.id, display = %b.display, "browser check");
         }
     } else {
-        output::print_success("Browsers with cookies:");
+        out.push(CheckLine {
+            level: Level::Success,
+            text: "Browsers with cookies:".to_string(),
+        });
         for b in available {
-            println!("  - {}", b.display);
+            out.push(CheckLine {
+                level: Level::Info,
+                text: format!("  - {}", b.display),
+            });
         }
     }
 
@@ -88,7 +116,10 @@ pub fn run(verbose: u8) -> Result<()> {
     if crate::application::backend::gallery_dl_executable().is_ok() {
         tracing::debug!("backend resolution OK");
         if verbose > 0 {
-            output::print_success("Backend resolution OK");
+            out.push(CheckLine {
+                level: Level::Success,
+                text: "Backend resolution OK".to_string(),
+            });
         }
     }
 
@@ -117,12 +148,19 @@ pub fn run(verbose: u8) -> Result<()> {
             }
         }
         if files == 0 {
-            output::print_info("Download archive: empty (dedup records appear after first scrape)");
+            out.push(CheckLine {
+                level: Level::Info,
+                text: "Download archive: empty (dedup records appear after first scrape)"
+                    .to_string(),
+            });
         } else {
-            output::print_success(&format!(
-                "Download archive: {entries} media across {files} account(s) in {}",
-                archive_dir.display()
-            ));
+            out.push(CheckLine {
+                level: Level::Success,
+                text: format!(
+                    "Download archive: {entries} media across {files} account(s) in {}",
+                    archive_dir.display()
+                ),
+            });
         }
     }
 
@@ -131,17 +169,47 @@ pub fn run(verbose: u8) -> Result<()> {
     match std::fs::create_dir_all(&test_dir) {
         Ok(()) => {
             let _ = std::fs::remove_dir(&test_dir);
-            output::print_success(&format!("Temp dir writable: {}", test_dir.display()));
+            out.push(CheckLine {
+                level: Level::Success,
+                text: format!("Temp dir writable: {}", test_dir.display()),
+            });
         }
         Err(e) => {
-            output::print_error(&format!("Temp dir not writable: {e}"));
+            out.push(CheckLine {
+                level: Level::Error,
+                text: format!("Temp dir not writable: {e}"),
+            });
             ok = false;
+        }
+    }
+
+    if ok {
+        out.push(CheckLine {
+            level: Level::Success,
+            text: "All checks passed".to_string(),
+        });
+    }
+    (out, ok)
+}
+
+pub fn run(verbose: u8) -> Result<()> {
+    tracing::debug!(verbose = verbose, "doctor start");
+    println!("scrapmf doctor — checking backends and system");
+    println!("─────────────────────────────────────────────");
+
+    let (lines, ok) = collect(verbose);
+    for line in &lines {
+        match line.level {
+            Level::Success => output::print_success(&line.text),
+            Level::Info => output::print_info(&line.text),
+            Level::Error => output::print_error(&line.text),
+            Level::Help => output::print_help(&line.text),
         }
     }
 
     println!("─────────────────────────────────────────────");
     if ok {
-        output::print_success("All checks passed");
+        // "All checks passed" is already the last line from collect
         Ok(())
     } else {
         Err(anyhow::anyhow!(
