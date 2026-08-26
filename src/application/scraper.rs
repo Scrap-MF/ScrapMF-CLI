@@ -301,8 +301,9 @@ pub fn scrape_with_hooks(
     }
 
     let mut outcome = ScrapeOutcome::default();
-    let urls: Vec<&String> =
-        std::iter::once(&req.url).chain(req.extra_urls.iter()).collect();
+    let urls: Vec<&String> = std::iter::once(&req.url)
+        .chain(req.extra_urls.iter())
+        .collect();
     for sub_url in urls {
         match run_one_sub_scrape(&req, sub_url, dry_run, hooks.as_deref_mut(), abort) {
             Ok(challenge_failures) => {

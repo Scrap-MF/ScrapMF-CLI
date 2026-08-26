@@ -82,13 +82,24 @@ pub(super) fn preview_and_execute(
             let needs_threads = site == "threads"
                 || req.url.contains("threads.com")
                 || req.url.contains("threads.net")
-                || req.extra_urls.iter().any(|u| u.contains("threads.com") || u.contains("threads.net"));
-            if needs_threads && !crate::providers::Provider::is_available(&crate::providers::threadstractor::Threadstractor) {
+                || req
+                    .extra_urls
+                    .iter()
+                    .any(|u| u.contains("threads.com") || u.contains("threads.net"));
+            if needs_threads
+                && !crate::providers::Provider::is_available(
+                    &crate::providers::threadstractor::Threadstractor,
+                )
+            {
                 let msg = "threadstractormf not found in PATH — install with: pipx install threadstractormf (or pip install threadstractormf)".to_string();
                 if !missing.contains(&msg) {
                     missing.push(msg);
                 }
-            } else if !needs_threads && !crate::providers::Provider::is_available(&crate::providers::gallery_dl::GalleryDl) {
+            } else if !needs_threads
+                && !crate::providers::Provider::is_available(
+                    &crate::providers::gallery_dl::GalleryDl,
+                )
+            {
                 let msg = "gallery-dl not found — run `scrapmf setup`".to_string();
                 if !missing.contains(&msg) {
                     missing.push(msg);
@@ -767,7 +778,12 @@ pub(super) fn prompt_quick_scrape() {
                 // All: single job, threadstractor will download the carousel once and split into photos/videos/profile siblings
                 // Use user root as base (e.g. ~/scrapmf/example_user), Python will create the three subfolders
                 let all_dirs = flatten_quick_dirs(vec!["{scrapmf_root}".to_string()], &username);
-                let req_all = base_req(Some(all_dirs), Vec::new(), extra_urls.clone(), username.clone());
+                let req_all = base_req(
+                    Some(all_dirs),
+                    Vec::new(),
+                    extra_urls.clone(),
+                    username.clone(),
+                );
                 jobs.push((
                     req_all,
                     site_name.clone(),
@@ -785,7 +801,12 @@ pub(super) fn prompt_quick_scrape() {
                         ],
                         &username,
                     );
-                    let mut req_photos = base_req(Some(photos_dirs), Vec::new(), extra_urls.clone(), username.clone());
+                    let mut req_photos = base_req(
+                        Some(photos_dirs),
+                        Vec::new(),
+                        extra_urls.clone(),
+                        username.clone(),
+                    );
                     req_photos.extra_args.push("--photos-only".to_string());
                     jobs.push((
                         req_photos,
@@ -804,7 +825,12 @@ pub(super) fn prompt_quick_scrape() {
                         ],
                         &username,
                     );
-                    let mut req_videos = base_req(Some(videos_dirs), Vec::new(), extra_urls.clone(), username.clone());
+                    let mut req_videos = base_req(
+                        Some(videos_dirs),
+                        Vec::new(),
+                        extra_urls.clone(),
+                        username.clone(),
+                    );
                     req_videos.extra_args.push("--videos-only".to_string());
                     jobs.push((
                         req_videos,
