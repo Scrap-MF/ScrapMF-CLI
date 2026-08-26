@@ -272,6 +272,9 @@ fn venv_pip(venv: &Path) -> (String, Vec<std::ffi::OsString>) {
     let py = venv.join("Scripts").join("python.exe");
     #[cfg(not(windows))]
     let py = venv.join("bin").join("python");
+    // browser-cookie3 is required by threadstractormf.auth.load_from_browser
+    // but upstream's `[browser]` extra only ships playwright (fixed upstream
+    // in a later release); install it explicitly so cookie loading works.
     (
         py.to_string_lossy().into_owned(),
         vec![
@@ -280,6 +283,7 @@ fn venv_pip(venv: &Path) -> (String, Vec<std::ffi::OsString>) {
             "install".into(),
             "--upgrade".into(),
             PKG_SPEC.into(),
+            "browser-cookie3>=0.20".into(),
         ],
     )
 }
