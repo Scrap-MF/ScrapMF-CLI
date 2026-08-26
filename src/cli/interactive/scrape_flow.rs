@@ -122,7 +122,10 @@ pub(super) fn preview_and_execute(
         let labels = requests
             .iter()
             .map(|(req, site, username, _)| {
-                format!("{}:{} ({})", site, username, req.extra_urls.len() + 1)
+                // Sub-process names are NOT baked into the header — the
+                // dashboard renders them as a per-job checklist.
+                let _ = (&req.url, &req.extra_urls);
+                format!("{site}:{username}")
             })
             .collect::<Vec<_>>();
         let state = Arc::new(std::sync::Mutex::new(crate::ui::DashboardState::new(
@@ -147,6 +150,22 @@ pub(super) fn preview_and_execute(
                     crate::application::runlog::RunLog::open(site, username),
                 ));
                 let mut hooks = crate::application::scraper::ScrapeHooks {
+                    on_steps_plan: Some(Box::new({
+                        let st = state.clone();
+                        move |names: Vec<String>| {
+                            st.lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .set_steps(i, names);
+                        }
+                    })),
+                    on_step: Some(Box::new({
+                        let st = state.clone();
+                        move |cur: usize| {
+                            st.lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .set_step(i, cur);
+                        }
+                    })),
                     on_file: Box::new({
                         let st = state.clone();
                         let rl = runlog.clone();

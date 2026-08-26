@@ -1,4 +1,4 @@
-use inquire::{InquireError, Select, Text};
+use inquire::{Select, Text};
 use std::io::Write;
 
 pub(super) fn clear_screen() {
@@ -43,75 +43,77 @@ pub(super) fn select_menu<'a, T: std::fmt::Display>(
 }
 
 /// Run interactive prompt. All scrape flows (saved profile, URL(s), quick
-/// scrape) run as internal batches via preview_and_execute; this function
-/// returns when the user picks Exit or cancels.
+/// scrape) run as internal batches via preview_and_execute. The home screen
+/// is a ratatui browser; picking an entry drops to the plain terminal for
+/// its inquire flow and returns to the browser afterwards.
 pub fn run() {
-    clear_screen();
+    use home::Action;
 
     loop {
-        let options = vec![
-            "Scrape",
-            "Configuration",
-            "Plugins",
-            "Doctor — check backends",
-            "Exit",
-        ];
-        let choice = match select_menu("What do you want to do?", options).prompt() {
-            Ok(c) => c,
-            Err(InquireError::OperationCanceled) => {
-                println!("canceled");
-                return;
-            }
-            Err(e) => {
-                eprintln!("error: interactive prompt failed: {e}");
-                return;
-            }
+        let Some(action) = home::pick() else {
+            println!("bye");
+            return;
         };
-
-        match choice {
-            "Scrape" => {
-                let origin = select_menu(
-                    "Scrape from:",
-                    vec!["Saved profile", "URL(s)", "Quick scrape"],
-                )
-                .prompt();
-                match origin {
-                    Ok("Saved profile") => {
+        match action {
+            Action::Scrape => {
+                use browser::{Browser, Outcome};
+                let outcome = Browser::new("Download content")
+                    .entry(
+                        "Saved profile",
+                        vec![
+                            "Run a saved scraping profile.".to_string(),
+                            String::new(),
+                            "Sites, cookies and output rules bundled".to_string(),
+                            "for repeatable runs.".to_string(),
+                        ],
+                    )
+                    .entry(
+                        "URL(s)",
+                        vec![
+                            "Paste & go: one or more URLs.".to_string(),
+                            "Site auto-detected per URL — no extra prompts.".to_string(),
+                        ],
+                    )
+                    .entry(
+                        "Quick scrape",
+                        vec![
+                            "One account, pick content kinds.".to_string(),
+                            "Fastest path: username in, media out.".to_string(),
+                        ],
+                    )
+                    .run();
+                match outcome {
+                    Outcome::Picked(0) => {
                         prompt_scrape_as_profile();
                         clear_screen();
                     }
                     // Single entry for 1..N URLs: paste, auto-match site by
                     // pattern, run — no per-run prompts ("paste and go").
-                    Ok("URL(s)") => {
+                    Outcome::Picked(1) => {
                         scrape_flow::prompt_scrape_direct_urls();
                         clear_screen();
                     }
-                    Ok("Quick scrape") => {
+                    Outcome::Picked(2) => {
                         prompt_quick_scrape();
                         clear_screen();
                     }
                     _ => {}
                 }
             }
-            "Configuration" => {
+            Action::Configuration => {
                 configuration_submenu();
                 clear_screen();
             }
-            "Plugins" => {
+            Action::Plugins => {
                 plugins_menu::menu();
                 clear_screen();
             }
-            "Doctor — check backends" => {
+            Action::Doctor => {
                 let _ = crate::commands::doctor::run(1);
-                // brief pause to see doctor output before clear
                 std::thread::sleep(std::time::Duration::from_millis(800));
                 clear_screen();
             }
-            "Exit" => {
-                println!("bye");
-                return;
-            }
-            _ => {
+            Action::Exit => {
                 println!("bye");
                 return;
             }
@@ -123,7 +125,9 @@ use profiles::prompt_scrape_as_profile;
 use scrape_flow::prompt_quick_scrape;
 use sites::configuration_submenu;
 
+pub(crate) mod browser;
 mod content;
+pub(crate) mod home;
 pub(crate) mod plugins_menu;
 mod profiles;
 mod scrape_flow;

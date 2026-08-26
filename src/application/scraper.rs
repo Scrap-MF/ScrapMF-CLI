@@ -223,12 +223,34 @@ pub fn is_challenge_exhausted_line(line: &str) -> bool {
 
 /// Optional UI hooks so the presentation layer (indicatif/log panel) can
 /// observe progress without application knowing about any UI crate.
+type PlanFn<'a> = dyn FnMut(Vec<String>) + 'a;
+
 pub struct ScrapeHooks<'a> {
     /// Called once per downloaded/skipped media file with its stdout line
     /// (the file path printed by gallery-dl).
     pub on_file: Box<dyn FnMut(&str) + 'a>,
     /// Called per gallery-dl stderr line (warnings, errors, notices).
     pub on_log: Box<dyn FnMut(&str) + 'a>,
+    /// Called once per job with the full sub-extractor plan (labels in run
+    /// order) — drives the dashboard's checklist.
+    pub on_steps_plan: Option<Box<PlanFn<'a>>>,
+    /// Called before each sub-extractor URL runs (1-based index).
+    pub on_step: Option<Box<dyn FnMut(usize) + 'a>>,
+}
+
+/// Short process name for a sub-extractor URL — dashboard progress label.
+pub fn sub_url_label(url: &str) -> &'static str {
+    if url.contains("/stories/") {
+        return "stories";
+    }
+    if url.contains("/highlights/") {
+        return "highlights";
+    }
+    if url.contains("/reels/") {
+        return "reels";
+    }
+    // Profile root passes and threads base URLs download the media feed.
+    "posts"
 }
 
 pub fn scrape(req: &ScrapeRequest, dry_run: bool) -> anyhow::Result<ScrapeOutcome> {
@@ -304,7 +326,17 @@ pub fn scrape_with_hooks(
     let urls: Vec<&String> = std::iter::once(&req.url)
         .chain(req.extra_urls.iter())
         .collect();
-    for sub_url in urls {
+    if let Some(hooks) = hooks.as_deref_mut()
+        && let Some(f) = hooks.on_steps_plan.as_mut()
+    {
+        f(urls.iter().map(|u| sub_url_label(u).to_string()).collect());
+    }
+    for (i, sub_url) in urls.into_iter().enumerate() {
+        if let Some(hooks) = hooks.as_deref_mut()
+            && let Some(f) = hooks.on_step.as_mut()
+        {
+            f(i + 1);
+        }
         match run_one_sub_scrape(&req, sub_url, dry_run, hooks.as_deref_mut(), abort) {
             Ok(challenge_failures) => {
                 outcome.success_count += 1;
@@ -534,10 +566,35 @@ fn run_one_sub_scrape(
 mod tests {
     use super::{
         FailureKind, ScrapeRequest, apply_sub_url_overrides, classify_failure,
-        is_instagram_posts_pass, validate_cookies_browser, validate_cookies_file,
+        is_instagram_posts_pass, sub_url_label, validate_cookies_browser, validate_cookies_file,
         validate_extra_args, validate_output_path, validate_url,
     };
     use std::io::Write;
+
+    #[test]
+    fn sub_url_labels_by_path() {
+        assert_eq!(
+            sub_url_label("https://www.instagram.com/stories/example_user/"),
+            "stories"
+        );
+        assert_eq!(
+            sub_url_label("https://www.instagram.com/example_user/highlights/"),
+            "highlights"
+        );
+        assert_eq!(
+            sub_url_label("https://www.instagram.com/reels/example_user/"),
+            "reels"
+        );
+        // profile root pass downloads the feed
+        assert_eq!(
+            sub_url_label("https://www.instagram.com/example_user/"),
+            "posts"
+        );
+        assert_eq!(
+            sub_url_label("https://www.threads.com/@example_user"),
+            "posts"
+        );
+    }
 
     /// TikTok private-but-followed profiles: the story list extractor dies
     /// fetching webapp.user-detail (statusCode 10222) even though the session

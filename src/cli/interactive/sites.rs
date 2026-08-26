@@ -5,42 +5,96 @@ use std::path::Path;
 use inquire::{Confirm, MultiSelect, Text};
 
 pub(super) fn configuration_submenu() {
+    use crate::cli::interactive::browser::{Browser, Outcome};
+
+    // Live data for the right pane
+    let sites: Vec<String> = crate::config::sites_dir()
+        .and_then(|dir| std::fs::read_dir(&dir).ok())
+        .map(|rd| {
+            let mut v: Vec<String> = rd
+                .flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "toml"))
+                .filter_map(|e| {
+                    e.path()
+                        .file_stem()
+                        .and_then(|n| n.to_str())
+                        .map(String::from)
+                })
+                .collect();
+            // plugin gating mirrors the menus that consume these entries
+            if !crate::plugins::threads_enabled() {
+                v.retain(|n| n != "threads");
+            }
+            v.sort();
+            v
+        })
+        .unwrap_or_default();
+    let profiles_count = crate::config::profiles_dir()
+        .and_then(|dir| std::fs::read_dir(&dir).ok())
+        .map(|rd| rd.flatten().count())
+        .unwrap_or(0);
+    let cfg = crate::config::load().unwrap_or_default();
+
     loop {
-        clear_screen();
-        let options = vec![
-            "Cookie profiles",
-            "Manage Sites",
-            "Manage Profiles",
-            "General settings",
-            "Back",
-        ];
-        let choice = match select_menu("What do you want to configure?", options).prompt() {
-            Ok(c) => c,
-            Err(_) => {
+        let outcome = Browser::new("Configuration")
+            .entry(
+                "Cookie profiles",
+                vec![
+                    "Named cookie sets captured from your browser.".to_string(),
+                    "Used by accounts to access private content.".to_string(),
+                ],
+            )
+            .entry("Manage Sites", {
+                let mut d = vec!["Site configs (editable with $EDITOR):".to_string()];
+                if sites.is_empty() {
+                    d.push("  (none found)".to_string());
+                }
+                d.extend(sites.iter().map(|s| format!("  · {s}")));
+                d
+            })
+            .entry(
+                "Manage Profiles",
+                vec![format!("{profiles_count} saved scraping profile(s).")],
+            )
+            .entry(
+                "General settings",
+                vec![
+                    format!(
+                        "output dir : {}",
+                        crate::config::expand_output_dir(&cfg.general.output_dir).display()
+                    ),
+                    format!(
+                        "archive    : {}",
+                        if cfg.general.archive { "on" } else { "off" }
+                    ),
+                ],
+            )
+            .entry("Back", vec!["Return to the main menu.".to_string()])
+            .run();
+
+        let choice = match outcome {
+            Outcome::Picked(i) => i,
+            _ => {
                 clear_screen();
                 return;
             }
         };
         match choice {
-            "Cookie profiles" => {
+            0 => {
                 cookie_profiles_menu();
                 clear_screen();
             }
-            "Manage Sites" => {
+            1 => {
                 manage_sites();
                 clear_screen();
             }
-            "Manage Profiles" => {
+            2 => {
                 manage_profiles();
                 clear_screen();
             }
-            "General settings" => {
+            3 => {
                 general_settings_menu();
                 clear_screen();
-            }
-            "Back" => {
-                clear_screen();
-                return;
             }
             _ => {
                 clear_screen();

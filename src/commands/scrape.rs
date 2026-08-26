@@ -268,6 +268,8 @@ fn run_scrape(
         ));
         let rl_out = runlog.clone();
         let mut hooks = crate::application::scraper::ScrapeHooks {
+            on_steps_plan: None,
+            on_step: None,
             on_file: Box::new(move |path: &str| {
                 rl_out.borrow_mut().line(path);
                 state2.lock().unwrap_or_else(|p| p.into_inner()).add_file(0);
