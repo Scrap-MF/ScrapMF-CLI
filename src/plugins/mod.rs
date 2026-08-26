@@ -8,7 +8,7 @@
 //! Layout under `$XDG_DATA_HOME/scrapmf/`:
 //! ```text
 //!   plugins/threads/venv/     dedicated virtualenv (python3 -m venv)
-//!   plugins/threads/version   installed pin, e.g. "v1.0.1"
+//!   plugins/threads/version   installed pin, e.g. "v1.0.3"
 //!   bin/threadstractormf      entry-point link to the venv binary
 //! ```
 //!
@@ -27,14 +27,40 @@ use std::path::{Path, PathBuf};
 
 /// Exact upstream release scrapmf installs. Bump manually per scrapmf
 /// release (same policy as `application::backend::GALLERY_DL_PIN`).
-pub const THREADSTRACTOR_PIN: &str = "v1.0.1";
+pub const THREADSTRACTOR_PIN: &str = "v1.0.4";
+
+// ─── Plugin registry ────────────────────────────────────────────────────────
+
+/// Static descriptor for a plugin. Adding a new plugin = one entry here plus
+/// its state/install dispatch; menus render straight from this registry.
+#[derive(Debug, Clone)]
+pub struct PluginDef {
+    /// Stable identifier (config keys, dispatch).
+    pub id: &'static str,
+    /// Display name shown in menus.
+    pub title: &'static str,
+    /// Vendor line, e.g. "MFApplications".
+    pub vendor: &'static str,
+}
+
+/// Every plugin scrapmf knows about, in menu order.
+pub const REGISTRY: &[PluginDef] = &[PluginDef {
+    id: "threads",
+    title: "ThreadstractorMF",
+    vendor: "MFApplications",
+}];
+
+/// Look up a plugin by id.
+pub fn by_id(id: &str) -> Option<&'static PluginDef> {
+    REGISTRY.iter().find(|p| p.id == id)
+}
 
 /// Public git source used by `pip install` during Enable.
 pub const THREADSTRACTOR_REPO: &str = "https://github.com/ExtractorsMF/ThreadstractorMF.git";
 
 const PKG_SPEC: &str = concat!(
     "threadstractormf[browser] @ git+",
-    "https://github.com/ExtractorsMF/ThreadstractorMF.git@v1.0.1"
+    "https://github.com/ExtractorsMF/ThreadstractorMF.git@v1.0.3"
 );
 
 /// Lifecycle state of the threads plugin.
@@ -88,16 +114,25 @@ fn venv_binary() -> Option<PathBuf> {
 
 /// Pure state computation — unit-testable without touching the filesystem.
 fn compute_state(venv_exists: bool, disabled: bool) -> PluginState {
+    let version = threads_version_file()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    compute_state_with(venv_exists, disabled, &version)
+}
+
+/// Pure state from injected inputs (no filesystem access).
+fn compute_state_with(venv_exists: bool, disabled: bool, version_file: &str) -> PluginState {
     match (venv_exists, disabled) {
         (false, _) => PluginState::NotInstalled,
         (true, true) => PluginState::Disabled,
-        (true, false) => PluginState::Enabled(
-            threads_version_file()
-                .and_then(|p| std::fs::read_to_string(p).ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| format!("unknown (pin {THREADSTRACTOR_PIN})")),
-        ),
+        (true, false) => {
+            let trimmed = version_file.trim();
+            if trimmed.is_empty() {
+                PluginState::Enabled(format!("unknown (pin {THREADSTRACTOR_PIN})"))
+            } else {
+                PluginState::Enabled(trimmed.to_string())
+            }
+        }
     }
 }
 
@@ -306,18 +341,32 @@ mod tests {
 
     #[test]
     fn state_matrix() {
-        assert_eq!(compute_state(false, false), PluginState::NotInstalled);
-        assert_eq!(compute_state(false, true), PluginState::NotInstalled);
-        assert_eq!(compute_state(true, true), PluginState::Disabled);
-        match compute_state(true, false) {
-            PluginState::Enabled(v) => assert!(v.contains("v1.0.1"), "got {v}"),
+        assert_eq!(
+            compute_state_with(false, false, ""),
+            PluginState::NotInstalled
+        );
+        assert_eq!(
+            compute_state_with(false, true, "v1.0.3"),
+            PluginState::NotInstalled
+        );
+        assert_eq!(
+            compute_state_with(true, true, "v1.0.3"),
+            PluginState::Disabled
+        );
+        match compute_state_with(true, false, "v1.0.3") {
+            PluginState::Enabled(v) => assert_eq!(v, "v1.0.3"),
             other => panic!("expected Enabled, got {other:?}"),
+        }
+        // empty/missing version file falls back to the pin marker
+        match compute_state_with(true, false, "") {
+            PluginState::Enabled(v) => assert!(v.contains(THREADSTRACTOR_PIN), "got {v}"),
+            other => panic!("expected Enabled fallback, got {other:?}"),
         }
     }
 
     #[test]
     fn pkg_spec_pins_version() {
-        assert!(PKG_SPEC.contains("@v1.0.1"));
+        assert!(PKG_SPEC.contains("@v1.0.3"));
         assert!(PKG_SPEC.starts_with("threadstractormf[browser] @ git+"));
     }
 
