@@ -21,6 +21,7 @@ pub fn domains_for_site(site_key: &str) -> &'static [&'static str] {
         "tiktok" => &["tiktok.com"],
         "twitter" | "x" => &["twitter.com", "x.com"],
         "vsco" => &["vsco.co"],
+        "threads" => &["threads.com", "threads.net"],
         _ => &[],
     }
 }

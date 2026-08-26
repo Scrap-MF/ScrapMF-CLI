@@ -1,59 +1,119 @@
-//! "Plugins" top-level submenu — install/update/disable/remove the threads
-//! provider. Thin UI over [`crate::plugins`] logic.
+//! "Plugins" top-level submenu — pick a plugin, then manage it
+//! (update/disable/remove). Thin UI over [`crate::plugins`] logic, rendered
+//! from the plugin registry so future plugins slot in without new menus.
 
 use crate::cli::interactive::{clear_screen, select_menu};
-use crate::plugins::{self, PluginState, THREADSTRACTOR_PIN};
+use crate::plugins::{self, PluginDef, PluginState, REGISTRY, THREADSTRACTOR_PIN};
 
+/// Entry point from the main menu.
 pub(super) fn menu() {
     loop {
         clear_screen();
-        let state = plugins::threads_state();
+        let mut options: Vec<String> = REGISTRY
+            .iter()
+            .map(|p| format!("{}  ·  {}", plugin_line(p), status_short(p.id)))
+            .collect();
+        options.push("Back".to_string());
+        let choice = match select_menu("Plugins:", options).prompt() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        if choice == "Back" {
+            return;
+        }
+        // Match back by title (labels are stable registry data).
+        if let Some(def) = REGISTRY.iter().find(|p| choice.starts_with(p.title)) {
+            plugin_submenu(def);
+        }
+    }
+}
+
+fn plugin_submenu(def: &PluginDef) {
+    let state = state_for(def);
+    loop {
+        clear_screen();
         let status = match &state {
             PluginState::NotInstalled => "not installed".to_string(),
             PluginState::Disabled => "disabled (files kept)".to_string(),
             PluginState::Enabled(v) => format!("enabled ({v})"),
         };
+        println!("── {} by {} ──", def.title, def.vendor);
+        println!("   {status}");
+        println!();
+
         let mut options: Vec<String> = Vec::new();
         match state {
             PluginState::NotInstalled => options.push(format!(
-                "Enable threads — install threadstractormf {THREADSTRACTOR_PIN} (~150MB Chromium download)"
+                "Enable — install at pin {THREADSTRACTOR_PIN} (~150MB Chromium download)"
             )),
             PluginState::Disabled => {
-                options.push("Enable threads".to_string());
-                options.push("Remove threads plugin (deletes all files)".to_string());
+                options.push("Enable".to_string());
+                options.push("Remove (deletes all files)".to_string());
             }
             PluginState::Enabled(_) => {
                 options.push(format!("Update / reinstall at pin {THREADSTRACTOR_PIN}"));
-                options.push("Disable threads (hide, keep files)".to_string());
-                options.push("Remove threads plugin (deletes all files)".to_string());
+                options.push("Disable (hide, keep files)".to_string());
+                options.push("Remove (deletes all files)".to_string());
             }
         }
         options.push("Back".to_string());
 
-        println!("Plugins — threads: {status}");
-        let choice = match select_menu("Plugin action:", options).prompt() {
+        let choice = match select_menu("Action:", options).prompt() {
             Ok(c) => c,
             Err(_) => return,
         };
         match choice.as_str() {
             "Back" => return,
-            c if c.starts_with("Enable threads") || c.starts_with("Update / reinstall") => {
+            c if c.starts_with("Enable") || c.starts_with("Update / reinstall") => {
                 if let Err(e) = plugins::install() {
                     eprintln!("✖ install failed: {e}");
+                } else if matches!(state, PluginState::NotInstalled | PluginState::Disabled) {
+                    println!("✔ {} by {} enabled", def.title, def.vendor);
                 }
                 pause();
             }
-            "Disable threads (hide, keep files)" => match plugins::set_disabled(true) {
-                Ok(()) => println!("✔ threads plugin disabled — options hidden, files kept"),
+            "Disable (hide, keep files)" => match plugins::set_disabled(true) {
+                Ok(()) => println!("✔ disabled — options hidden, files kept"),
                 Err(e) => eprintln!("✖ failed: {e}"),
             },
-            "Remove threads plugin (deletes all files)" => match plugins::remove() {
-                Ok(()) => println!("✔ threads plugin removed completely"),
+            "Remove (deletes all files)" => match plugins::remove() {
+                Ok(()) => println!("✔ removed completely"),
                 Err(e) => eprintln!("✖ remove failed: {e}"),
             },
             _ => {}
         }
     }
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+/// Lifecycle state for a registry entry (only threads today).
+fn state_for(def: &PluginDef) -> PluginState {
+    match def.id {
+        "threads" => plugins::threads_state(),
+        _ => PluginState::NotInstalled,
+    }
+}
+
+/// Short status for the plugin list line.
+fn status_short(id: &str) -> String {
+    match state_for_id(id) {
+        PluginState::NotInstalled => "not installed".to_string(),
+        PluginState::Disabled => "disabled".to_string(),
+        PluginState::Enabled(v) => format!("enabled v{v}"),
+    }
+}
+
+fn state_for_id(id: &str) -> PluginState {
+    match id {
+        "threads" => plugins::threads_state(),
+        _ => PluginState::NotInstalled,
+    }
+}
+
+/// "ThreadstractorMF by MFApplications"
+fn plugin_line(def: &PluginDef) -> String {
+    format!("{} by {}", def.title, def.vendor)
 }
 
 fn pause() {

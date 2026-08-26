@@ -163,11 +163,15 @@ fn create_profile_wizard() {
         return;
     };
 
-    // Network multi-select with an "All" shortcut.
+    // Network multi-select with an "All" shortcut. Plugin-backed networks
+    // (threads) only appear while their plugin is enabled.
     clear_screen();
-    const NETWORKS: &[&str] = &["instagram", "tiktok", "twitter", "vsco"];
+    let mut networks: Vec<&str> = vec!["instagram", "tiktok", "twitter", "vsco"];
+    if crate::plugins::threads_enabled() {
+        networks.push("threads");
+    }
     let mut net_opts: Vec<String> = vec!["All networks".into()];
-    net_opts.extend(NETWORKS.iter().map(|s| super::theme::brand_site_label(s)));
+    net_opts.extend(networks.iter().map(|s| super::theme::brand_site_label(s)));
     let Ok(picked_raw): Result<Vec<String>, _> = MultiSelect::new("Which networks?", net_opts)
         .without_filtering()
         .with_render_config(render_config())
@@ -183,7 +187,7 @@ fn create_profile_wizard() {
     // Labels carry ANSI; map back to clean keys via brand_site_label output.
     let mut sites: Vec<String> = Vec::new();
     for picked in &picked_raw {
-        for net in NETWORKS {
+        for net in &networks {
             if super::theme::brand_site_label(net) == *picked || picked == "All networks" {
                 sites.push((*net).to_string());
                 break;

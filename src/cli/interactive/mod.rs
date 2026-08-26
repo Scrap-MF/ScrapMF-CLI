@@ -11,7 +11,7 @@ pub(super) fn clear_screen() {
         let ver =
             anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Magenta)));
         println!(
-            "{}  ▄▅▆▇ {} v{}{}{} — gallery-dl orchestrator",
+            "{}  ▄▅▆▇ {} v{}{}{} — by MFApplications",
             anstyle::Reset.render(),
             name.render(),
             ver.render(),
@@ -20,7 +20,7 @@ pub(super) fn clear_screen() {
         );
     } else {
         println!(
-            "  ▄▅▆▇ scrapmf v{} — gallery-dl orchestrator",
+            "  ▄▅▆▇ scrapmf v{} — by MFApplications",
             env!("CARGO_PKG_VERSION")
         );
     }
