@@ -624,15 +624,11 @@ pub fn capture_chromium(
             {
                 continue;
             }
-            let mut encrypted_value: Vec<u8> = Vec::new();
-            if !encrypted_hex.is_empty() && encrypted_hex.len() % 2 == 0 {
-                for b in encrypted_hex.as_bytes().chunks(2) {
-                    let hex_str = std::str::from_utf8(b).unwrap_or("00");
-                    if let Ok(byte) = u8::from_str_radix(hex_str, 16) {
-                        encrypted_value.push(byte);
-                    }
-                }
-            }
+            let encrypted_value: Vec<u8> = if encrypted_hex.is_empty() {
+                Vec::new()
+            } else {
+                hex::decode(encrypted_hex).unwrap_or_default()
+            };
             if plain_value.is_empty() && first_blob.is_none() && !encrypted_value.is_empty() {
                 first_blob = Some(encrypted_value.clone());
             }
