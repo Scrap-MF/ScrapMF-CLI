@@ -37,6 +37,20 @@ pub fn normalize_id(raw: &str) -> String {
         .to_string()
 }
 
+fn title_to_username(title: &str) -> String {
+    let t = title.trim();
+    let stripped = if t.to_lowercase().starts_with("fotos de ") {
+        t[9..].trim()
+    } else {
+        t
+    };
+    let sanitized: String = stripped
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    sanitized.trim_matches('_').to_string()
+}
+
 /// Extract identifier (username or ID) from a Facebook URL or raw input.
 /// Handles:
 /// - https://www.facebook.com/profile.php?id=123456789012345[&...]
@@ -170,12 +184,7 @@ fn resolve_via_gallery_dl(
                 if let Some(val) = lines.next() {
                     let v = val.trim();
                     if !v.is_empty() {
-                        // Sanitize page title to a folder-safe username-like string
-                        let sanitized: String = v
-                            .chars()
-                            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-                            .collect();
-                        let sanitized = sanitized.trim_matches('_').to_string();
+                        let sanitized = title_to_username(v);
                         if !sanitized.is_empty() {
                             return Ok(sanitized);
                         }
@@ -192,10 +201,10 @@ fn resolve_via_gallery_dl(
                     // Try title/name inside JSON
                     if let Some(t) = v.get("title").and_then(|s| s.as_str()) {
                         if !t.is_empty() {
-                            return Ok(t
-                                .chars()
-                                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-                                .collect());
+                            let sanitized = title_to_username(t);
+                            if !sanitized.is_empty() {
+                                return Ok(sanitized);
+                            }
                         }
                     }
                 }
@@ -217,11 +226,7 @@ fn resolve_via_gallery_dl(
                     for key in ["title", "name"] {
                         if let Some(t) = v.get(key).and_then(|s| s.as_str()) {
                             if !t.is_empty() {
-                                let sanitized: String = t
-                                    .chars()
-                                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-                                    .collect();
-                                let sanitized = sanitized.trim_matches('_').to_string();
+                                let sanitized = title_to_username(t);
                                 if !sanitized.is_empty() {
                                     return Ok(sanitized);
                                 }
