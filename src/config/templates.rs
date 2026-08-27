@@ -683,6 +683,23 @@ pub fn ensure_facebook_site() -> anyhow::Result<()> {
     let mut extractor: std::collections::HashMap<String, toml::Value> =
         std::collections::HashMap::new();
 
+    // facebook:user — publicaciones (user dispatch, same as photos feed)
+    let mut user_table = toml::map::Map::new();
+    user_table.insert(
+        "directory".to_string(),
+        toml::Value::Array(vec![
+            toml::Value::String("{scrapmf_root}".to_string()),
+            toml::Value::String("{category}".to_string()),
+            toml::Value::String("{username}".to_string()),
+            toml::Value::String("posts".to_string()),
+        ]),
+    );
+    user_table.insert(
+        "filename".to_string(),
+        toml::Value::String("{date:%Y-%m-%d}_{id}_{num:02d}.{extension}".to_string()),
+    );
+    extractor.insert("facebook:user".to_string(), toml::Value::Table(user_table));
+
     // facebook:photos — publicaciones (feed)
     let mut photos_table = toml::map::Map::new();
     photos_table.insert(

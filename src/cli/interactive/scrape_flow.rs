@@ -6,7 +6,7 @@ use inquire::{Confirm, Text};
 use crate::application::scraper::{ScrapeRequest, validate_url};
 use crate::config;
 
-use super::content::{build_tagged_urls, prompt_content_kinds, select_urls};
+use super::content::{ContentKind, build_tagged_urls, prompt_content_kinds, select_urls};
 use super::{ask_nonempty, select_menu};
 
 /// Ask whether this run should use a named cookie profile instead of the
@@ -723,6 +723,12 @@ pub(super) fn prompt_quick_scrape() {
             raw_input.trim().trim_start_matches('@').to_string(),
         )
     };
+    // Keep original ID for facebook URL building (pages use profile.php?id=ID, not sanitized title)
+    let facebook_id_for_url: Option<String> = if site_name == "facebook" && raw_is_id {
+        Some(raw_id.clone())
+    } else {
+        None
+    };
 
     // Content menu — same cycle as username (choose content before cookies/resolve)
     let kinds = prompt_content_kinds(
@@ -810,7 +816,30 @@ pub(super) fn prompt_quick_scrape() {
         display_for_menu.clone()
     };
 
-    let tagged = build_tagged_urls(&site_name, &username);
+    let tagged = if site_name == "facebook"
+        && let Some(id) = &facebook_id_for_url
+    {
+        vec![
+            (
+                ContentKind::Posts,
+                format!("https://www.facebook.com/profile.php?id={id}"),
+            ),
+            (
+                ContentKind::Albums,
+                format!("https://www.facebook.com/profile.php?id={id}/photos_albums"),
+            ),
+            (
+                ContentKind::Videos,
+                format!("https://www.facebook.com/profile.php?id={id}/videos/"),
+            ),
+            (
+                ContentKind::Profile,
+                format!("https://www.facebook.com/profile.php?id={id}/avatar"),
+            ),
+        ]
+    } else {
+        build_tagged_urls(&site_name, &username)
+    };
     let Some((url, extra_urls)) = select_urls(&tagged, &kinds) else {
         println!("ℹ No content selected");
         return;
