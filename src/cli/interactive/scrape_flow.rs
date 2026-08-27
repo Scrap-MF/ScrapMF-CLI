@@ -714,6 +714,8 @@ pub(super) fn prompt_quick_scrape() {
     } else {
         None
     };
+    // Ensure terminal line is clean after Select (inquire leaves raw escape on some terms)
+    println!();
     let (cookies_file_for_resolve, cookies_browser_for_resolve) =
         if let Some(ref ov) = cookie_override {
             (Some(ov.as_path()), None)

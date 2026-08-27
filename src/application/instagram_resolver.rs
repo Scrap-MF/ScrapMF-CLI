@@ -77,50 +77,91 @@ fn resolve_via_ig_api(
         None
     };
 
-    let url = format!("https://i.instagram.com/api/v1/users/{id}/info/");
-    let mut cmd = std::process::Command::new("curl");
-    cmd.arg("-sL")
-        .arg("--max-time")
-        .arg("12")
-        .arg("-H")
-        .arg("User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
-        .arg("-H")
-        .arg("X-IG-App-ID: 936619743392459")
-        .arg("-H")
-        .arg("Accept: application/json")
-        .arg(&url);
-    if let Some(ref c) = temp_cookie {
-        cmd.arg("--cookie").arg(c);
+    // Extract csrftoken for X-CSRFToken header if we have a Netscape file
+    let cookie_path_for_csrf: Option<&Path> = temp_cookie.as_deref().or(cookies_file);
+    let csrf_token = cookie_path_for_csrf
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|content| {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') && !line.starts_with("#HttpOnly_") {
+                    continue;
+                }
+                let cols: Vec<&str> = line.split('\t').collect();
+                if cols.len() == 7 && cols[5] == "csrftoken" {
+                    return Some(cols[6].to_string());
+                }
+            }
+            None
+        });
+
+    let mut result: Option<String> = None;
+    for base in [
+        format!("https://i.instagram.com/api/v1/users/{id}/info/"),
+        format!("https://www.instagram.com/api/v1/users/{id}/info/"),
+    ] {
+        let mut cmd = std::process::Command::new("curl");
+        cmd.arg("-sL")
+            .arg("--max-time")
+            .arg("12")
+            .arg("-H")
+            .arg("User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+            .arg("-H")
+            .arg("X-IG-App-ID: 936619743392459")
+            .arg("-H")
+            .arg("Accept: application/json")
+            .arg("-H")
+            .arg("Referer: https://www.instagram.com/")
+            .arg("-H")
+            .arg("X-Requested-With: XMLHttpRequest");
+        if let Some(ref t) = csrf_token {
+            cmd.arg("-H").arg(format!("X-CSRFToken: {t}"));
+        }
+        cmd.arg(&base);
+        if let Some(ref c) = temp_cookie {
+            cmd.arg("--cookie").arg(c);
+        } else if let Some(p) = cookies_file {
+            cmd.arg("--cookie").arg(p);
+        }
+        let out = match cmd.output() {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+        if !out.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(u) = v
+                .get("user")
+                .and_then(|u| u.get("username"))
+                .and_then(|s| s.as_str())
+            {
+                result = Some(u.to_string());
+                break;
+            }
+            if let Some(u) = v.get("username").and_then(|s| s.as_str()) {
+                result = Some(u.to_string());
+                break;
+            }
+            if let Some(u) = v
+                .get("data")
+                .and_then(|d| d.get("user"))
+                .and_then(|u| u.get("username"))
+                .and_then(|s| s.as_str())
+            {
+                result = Some(u.to_string());
+                break;
+            }
+        }
     }
-    let out = cmd.output().context("run curl")?;
-    if let Some(p) = temp_cookie
+    if let Some(p) = &temp_cookie
         && p.to_string_lossy().contains("__resolve_")
     {
         let _ = std::fs::remove_file(p);
     }
-    if !out.status.success() {
-        anyhow::bail!("curl failed");
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-        if let Some(u) = v
-            .get("user")
-            .and_then(|u| u.get("username"))
-            .and_then(|s| s.as_str())
-        {
-            return Ok(u.to_string());
-        }
-        if let Some(u) = v.get("username").and_then(|s| s.as_str()) {
-            return Ok(u.to_string());
-        }
-        if let Some(u) = v
-            .get("data")
-            .and_then(|d| d.get("user"))
-            .and_then(|u| u.get("username"))
-            .and_then(|s| s.as_str())
-        {
-            return Ok(u.to_string());
-        }
+    if let Some(u) = result {
+        return Ok(u);
     }
     anyhow::bail!("username not found in API response");
 }
