@@ -688,6 +688,10 @@ pub(super) fn prompt_quick_scrape() {
                 crate::output::print_error(&format!(
                     "no se pudo resolver ID a username: {e} — verifica el ID y que la sesión de IG esté vigente"
                 ));
+                crate::output::print_help("nota: el error queda visible hasta que presiones Enter");
+                let _ = Text::new("Presiona Enter para volver")
+                    .with_render_config(super::theme::render_config())
+                    .prompt();
                 return;
             }
         }
