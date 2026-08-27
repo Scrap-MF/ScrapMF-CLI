@@ -678,7 +678,19 @@ pub fn ensure_facebook_site() -> anyhow::Result<()> {
     crate::config::fs::restrict_perms(&dir, true);
     let target = dir.join("facebook.toml");
     if target.exists() {
-        return Ok(());
+        // Migrate outdated facebook.toml (pre-highlights removal, missing facebook:user)
+        if let Ok(existing) = std::fs::read_to_string(&target) {
+            let has_user = existing.contains("facebook:user");
+            let has_highlights = existing.contains("facebook:highlights");
+            let has_stories = existing.contains("facebook:stories");
+            if has_user && !has_highlights && !has_stories {
+                return Ok(());
+            }
+            // Outdated — will be overwritten below with correct 4-table site
+            let _ = std::fs::remove_file(&target);
+        } else {
+            return Ok(());
+        }
     }
     let mut extractor: std::collections::HashMap<String, toml::Value> =
         std::collections::HashMap::new();
