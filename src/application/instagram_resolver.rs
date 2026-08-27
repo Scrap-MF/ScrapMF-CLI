@@ -65,13 +65,13 @@ fn resolve_via_ig_api(
             &tmp_name,
         ) {
             Ok((path, _)) => Some(path),
-            Err(_) => match crate::config::cookies::capture_firefox(
-                &["instagram".to_string()],
-                &tmp_name,
-            ) {
-                Ok((path, _)) => Some(path),
-                Err(e) => anyhow::bail!("cannot capture cookies for resolver: {e}"),
-            },
+            Err(_) => {
+                match crate::config::cookies::capture_firefox(&["instagram".to_string()], &tmp_name)
+                {
+                    Ok((path, _)) => Some(path),
+                    Err(e) => anyhow::bail!("cannot capture cookies for resolver: {e}"),
+                }
+            }
         }
     } else {
         None

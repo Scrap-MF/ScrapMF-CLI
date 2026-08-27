@@ -665,23 +665,74 @@ pub(super) fn prompt_quick_scrape() {
         Some(s) => s,
         None => return,
     };
-    // Instagram: allow numeric ID, resolve to username so folder is username
-    let username = if site_name == "instagram"
-        && crate::application::instagram_resolver::is_id_like(&raw_input)
-    {
-        let id = crate::application::instagram_resolver::normalize_id(&raw_input);
-        let site_cfg_tmp = cfg.sites.get(site_name.as_str()).cloned();
-        let cookies_file_tmp = site_cfg_tmp.as_ref().and_then(|s| s.cookies.clone());
-        let cookies_browser_tmp = site_cfg_tmp
-            .as_ref()
-            .and_then(|s| s.cookies_from_browser.clone());
+    let raw_is_id =
+        site_name == "instagram" && crate::application::instagram_resolver::is_id_like(&raw_input);
+    let raw_id = if raw_is_id {
+        crate::application::instagram_resolver::normalize_id(&raw_input)
+    } else {
+        String::new()
+    };
+    let display_for_menu = if raw_is_id {
+        raw_id.clone()
+    } else {
+        raw_input.trim().trim_start_matches('@').to_string()
+    };
+
+    // Content menu — same cycle as username (choose content before cookies/resolve)
+    let kinds = prompt_content_kinds(
+        &site_name,
+        &super::theme::brand_account_label(&format!("{site_name}:{display_for_menu}")),
+    );
+    if kinds.is_empty() {
+        println!("ℹ No content selected");
+        return;
+    }
+
+    // Site config (raw, not yet baked with username)
+    let site_cfg = cfg.sites.get(site_name.as_str()).cloned();
+    let extractor_options_raw = site_cfg
+        .as_ref()
+        .map(|s| s.extractor.clone())
+        .unwrap_or_default();
+    let directory_template_raw = site_cfg.as_ref().and_then(|s| s.directory_template.clone());
+    let cookies_from_browser_cfg = site_cfg
+        .as_ref()
+        .and_then(|s| s.cookies_from_browser.clone());
+    let cookies_file_cfg = site_cfg.as_ref().and_then(|s| s.cookies.clone());
+    let rate_limit = site_cfg.as_ref().and_then(|s| s.rate_limit.clone());
+    let archive = site_cfg.as_ref().and_then(|s| s.archive.clone());
+    let extra_args = site_cfg
+        .as_ref()
+        .map(|s| s.extra_args.clone())
+        .unwrap_or_default();
+    let filename_template = site_cfg.as_ref().and_then(|s| s.filename_template.clone());
+
+    // Per-run cookie override comes BEFORE ID resolution so resolver uses
+    // the same session that will be used for downloading (same cycle as username).
+    let cookie_override = if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        prompt_cookie_override()
+    } else {
+        None
+    };
+    let (cookies_file_for_resolve, cookies_browser_for_resolve) =
+        if let Some(ref ov) = cookie_override {
+            (Some(ov.as_path()), None)
+        } else {
+            (
+                cookies_file_cfg.as_deref(),
+                cookies_from_browser_cfg.as_deref(),
+            )
+        };
+
+    // Now resolve ID → username if needed, using the final cookies
+    let username = if raw_is_id {
         match crate::application::instagram_resolver::resolve_instagram_username(
-            &id,
-            cookies_file_tmp.as_deref(),
-            cookies_browser_tmp.as_deref(),
+            &raw_id,
+            cookies_file_for_resolve,
+            cookies_browser_for_resolve,
         ) {
             Ok(u) => {
-                println!("→ ID → @{} (resuelto)", u);
+                println!("→ {} → @{} (resuelto)", raw_id, u);
                 u
             }
             Err(e) => {
@@ -696,14 +747,9 @@ pub(super) fn prompt_quick_scrape() {
             }
         }
     } else {
-        raw_input.trim().trim_start_matches('@').to_string()
+        display_for_menu.clone()
     };
 
-    // Content menu — single account, direct prompt
-    let kinds = prompt_content_kinds(
-        &site_name,
-        &super::theme::brand_account_label(&format!("{site_name}:{username}")),
-    );
     let tagged = build_tagged_urls(&site_name, &username);
     let Some((url, extra_urls)) = select_urls(&tagged, &kinds) else {
         println!("ℹ No content selected");
@@ -716,20 +762,11 @@ pub(super) fn prompt_quick_scrape() {
 
     let kinds_desc = super::content::kinds_description(&site_name, &kinds);
 
-    let site_cfg = cfg.sites.get(site_name.as_str()).cloned();
-    let mut extractor_options = site_cfg
-        .as_ref()
-        .map(|s| s.extractor.clone())
-        .unwrap_or_default();
-
-    // QUICK MODE — root tree at username: strip identity segments from every
-    // directory template (global + per-extractor, plain AND conditional
-    // tables like TikTok posts) and bake the username where {scrapmf_root}
-    // was, so paths never depend on gallery-dl keyword resolution.
-    let directory_template = site_cfg
-        .as_ref()
-        .and_then(|s| s.directory_template.clone())
+    // QUICK MODE — bake the resolved username into directory templates
+    let directory_template = directory_template_raw
+        .clone()
         .map(|dirs| flatten_quick_dirs(dirs, &username));
+    let mut extractor_options = extractor_options_raw.clone();
     for v in extractor_options.values_mut() {
         if let toml::Value::Table(map) = v
             && let Some(dir) = map.get_mut("directory")
@@ -737,17 +774,12 @@ pub(super) fn prompt_quick_scrape() {
             flatten_for_quick(dir, &username);
         }
     }
-    let cookies_from_browser = site_cfg
-        .as_ref()
-        .and_then(|s| s.cookies_from_browser.clone());
-    let cookies_file = site_cfg.as_ref().and_then(|s| s.cookies.clone());
-    let rate_limit = site_cfg.as_ref().and_then(|s| s.rate_limit.clone());
-    let archive = site_cfg.as_ref().and_then(|s| s.archive.clone());
-    let extra_args = site_cfg
-        .as_ref()
-        .map(|s| s.extra_args.clone())
-        .unwrap_or_default();
-    let filename_template = site_cfg.as_ref().and_then(|s| s.filename_template.clone());
+    // Final cookies for the jobs: override wins over site config
+    let (cookies_file, cookies_from_browser) = if let Some(ref ov) = cookie_override {
+        (Some(ov.clone()), None)
+    } else {
+        (cookies_file_cfg.clone(), cookies_from_browser_cfg.clone())
+    };
 
     let base_req = |directory_override: Option<Vec<String>>,
                     extra_opts: Vec<(String, String)>,
@@ -809,15 +841,6 @@ pub(super) fn prompt_quick_scrape() {
                 format!("{username} ({pass})"),
                 pass.to_string(),
             ));
-        }
-        // Per-run cookie override (named profile instead of site defaults)
-        if std::io::IsTerminal::is_terminal(&std::io::stdout())
-            && let Some(file) = prompt_cookie_override()
-        {
-            for (req, ..) in jobs.iter_mut() {
-                req.cookies_file = Some(file.clone());
-                req.cookies_from_browser = None;
-            }
         }
         preview_and_execute(jobs, &cfg);
         return;
@@ -900,32 +923,13 @@ pub(super) fn prompt_quick_scrape() {
                     "profile".to_string(),
                 ));
             }
-            // Per-run cookie override
-            if std::io::IsTerminal::is_terminal(&std::io::stdout())
-                && let Some(file) = prompt_cookie_override()
-            {
-                for (req, ..) in jobs.iter_mut() {
-                    req.cookies_file = Some(file.clone());
-                    req.cookies_from_browser = None;
-                }
-            }
             preview_and_execute(jobs, &cfg);
             return;
         }
     }
 
     let req = base_req(directory_template, Vec::new(), extra_urls, username.clone());
-
-    // Per-run cookie override (named profile instead of site defaults)
-    let mut jobs = vec![(req, site_name.clone(), username.clone(), kinds_desc)];
-    if std::io::IsTerminal::is_terminal(&std::io::stdout())
-        && let Some(file) = prompt_cookie_override()
-    {
-        for (req, ..) in jobs.iter_mut() {
-            req.cookies_file = Some(file.clone());
-            req.cookies_from_browser = None;
-        }
-    }
+    let jobs = vec![(req, site_name.clone(), username.clone(), kinds_desc)];
     preview_and_execute(jobs, &cfg);
 }
 
