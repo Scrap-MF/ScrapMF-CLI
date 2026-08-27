@@ -84,7 +84,7 @@ impl Provider for GalleryDl {
     }
 
     fn build_args(&self, req: &ScrapeRequest) -> anyhow::Result<Vec<OsString>> {
-        let mut args = Vec::new();
+        let mut args = Vec::with_capacity(32 + req.extractor_options.len() * 2);
         // Cookies handling (anti-bot) — file and browser
         if let Some(ref file) = req.cookies_file {
             args.push(OsString::from("--cookies"));

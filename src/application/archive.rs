@@ -37,22 +37,7 @@ pub struct Entry {
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
 fn sanitize_component(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .take(64)
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if cleaned.is_empty() {
-        "misc".to_string()
-    } else {
-        cleaned
-    }
+    crate::util::sanitize_component(name, 64, "misc")
 }
 
 /// Canonical archive file: `<config>/archive/<site>/<account>.jsonl`.

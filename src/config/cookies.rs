@@ -36,23 +36,7 @@ pub fn cookies_dir() -> Option<PathBuf> {
 }
 
 fn sanitize_name(name: &str) -> String {
-    let cleaned: String = name
-        .trim()
-        .chars()
-        .take(48)
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if cleaned.is_empty() {
-        "unnamed".to_string()
-    } else {
-        cleaned
-    }
+    crate::util::sanitize_component(name.trim(), 48, "unnamed")
 }
 
 pub fn profile_path(name: &str) -> Option<PathBuf> {

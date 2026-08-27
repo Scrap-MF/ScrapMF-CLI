@@ -47,7 +47,7 @@ impl Provider for Threadstractor {
 
     #[allow(clippy::collapsible_if)]
     fn build_args(&self, req: &ScrapeRequest) -> anyhow::Result<Vec<OsString>> {
-        let mut args = Vec::new();
+        let mut args = Vec::with_capacity(16);
 
         // Cookies (same as gallery-dl)
         if let Some(ref file) = req.cookies_file {

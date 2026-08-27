@@ -315,7 +315,7 @@ pub fn scan_partials(dir: &Path) -> Vec<PathBuf> {
             let p = entry.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.to_string_lossy().ends_with(".part") {
+            } else if p.extension().is_some_and(|e| e == "part") {
                 found.push(p);
             }
         }
