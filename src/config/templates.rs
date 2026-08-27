@@ -666,6 +666,209 @@ pub fn ensure_threads_site() -> anyhow::Result<()> {
     write_config_file(&target, &content)
 }
 
+/// Ensure sites/facebook.toml exists with 0o600 (no clobber).
+/// Facebook strategy — via gallery-dl (verified 1.32.9 via -K).
+/// Separates publicaciones/álbumes/videos/perfil + historias/destacadas (featured)
+/// like instagram:highlights (placeholders until upstream stories/highlights).
+pub fn ensure_facebook_site() -> anyhow::Result<()> {
+    let Some(dir) = sites_dir() else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    crate::config::fs::restrict_perms(&dir, true);
+    let target = dir.join("facebook.toml");
+    if target.exists() {
+        return Ok(());
+    }
+    let mut extractor: std::collections::HashMap<String, toml::Value> =
+        std::collections::HashMap::new();
+
+    // facebook:photos — publicaciones (feed)
+    let mut photos_table = toml::map::Map::new();
+    photos_table.insert(
+        "include".to_string(),
+        toml::Value::Array(vec![toml::Value::String("photos".to_string())]),
+    );
+    photos_table.insert(
+        "directory".to_string(),
+        toml::Value::Array(vec![
+            toml::Value::String("{scrapmf_root}".to_string()),
+            toml::Value::String("{category}".to_string()),
+            toml::Value::String("{username}".to_string()),
+            toml::Value::String("photos".to_string()),
+        ]),
+    );
+    photos_table.insert(
+        "filename".to_string(),
+        toml::Value::String("{date:%Y-%m-%d}_{id}_{num:02d}.{extension}".to_string()),
+    );
+    extractor.insert(
+        "facebook:photos".to_string(),
+        toml::Value::Table(photos_table),
+    );
+
+    // facebook:albums — álbumes (set_id + title)
+    let mut albums_table = toml::map::Map::new();
+    albums_table.insert(
+        "include".to_string(),
+        toml::Value::Array(vec![toml::Value::String("albums".to_string())]),
+    );
+    albums_table.insert(
+        "directory".to_string(),
+        toml::Value::Array(vec![
+            toml::Value::String("{scrapmf_root}".to_string()),
+            toml::Value::String("{category}".to_string()),
+            toml::Value::String("{username}".to_string()),
+            toml::Value::String("albums".to_string()),
+            toml::Value::String("{title[:220]}{set_id:? (/)/}".to_string()),
+        ]),
+    );
+    albums_table.insert(
+        "filename".to_string(),
+        toml::Value::String("{id}.{extension}".to_string()),
+    );
+    extractor.insert(
+        "facebook:albums".to_string(),
+        toml::Value::Table(albums_table),
+    );
+
+    // facebook:video — videos
+    let mut video_table = toml::map::Map::new();
+    video_table.insert(
+        "directory".to_string(),
+        toml::Value::Array(vec![
+            toml::Value::String("{scrapmf_root}".to_string()),
+            toml::Value::String("{category}".to_string()),
+            toml::Value::String("{username}".to_string()),
+            toml::Value::String("videos".to_string()),
+        ]),
+    );
+    video_table.insert(
+        "filename".to_string(),
+        toml::Value::String("{date:%Y-%m-%d}_{id}.{extension}".to_string()),
+    );
+    extractor.insert(
+        "facebook:video".to_string(),
+        toml::Value::Table(video_table),
+    );
+
+    // facebook:avatar — perfil
+    let mut avatar_table = toml::map::Map::new();
+    avatar_table.insert(
+        "directory".to_string(),
+        toml::Value::Array(vec![
+            toml::Value::String("{scrapmf_root}".to_string()),
+            toml::Value::String("{category}".to_string()),
+            toml::Value::String("{username}".to_string()),
+            toml::Value::String("profile".to_string()),
+        ]),
+    );
+    avatar_table.insert(
+        "filename".to_string(),
+        toml::Value::String("{username}_{id}.{extension}".to_string()),
+    );
+    extractor.insert(
+        "facebook:avatar".to_string(),
+        toml::Value::Table(avatar_table),
+    );
+
+    // facebook:highlights — destacadas (featured), separadas como instagram:highlights
+    // Placeholder hasta que gallery-dl exponga facebook:highlights/stories; usa id+title como instagram post_id+highlight_title
+    let mut highlights_table = toml::map::Map::new();
+    highlights_table.insert(
+        "include".to_string(),
+        toml::Value::Array(vec![toml::Value::String("highlights".to_string())]),
+    );
+    highlights_table.insert(
+        "directory".to_string(),
+        toml::Value::Array(vec![
+            toml::Value::String("{scrapmf_root}".to_string()),
+            toml::Value::String("{category}".to_string()),
+            toml::Value::String("{username}".to_string()),
+            toml::Value::String("highlights".to_string()),
+            toml::Value::String("{id}{title:?_//}".to_string()),
+        ]),
+    );
+    highlights_table.insert(
+        "filename".to_string(),
+        toml::Value::String("{id}.{extension}".to_string()),
+    );
+    extractor.insert(
+        "facebook:highlights".to_string(),
+        toml::Value::Table(highlights_table),
+    );
+
+    // facebook:stories — historias (efímeras), como instagram:stories con fecha
+    let stories_year = "\\fF {date.strftime(\"%Y\")}".to_string();
+    let stories_month = "\\fF {date.strftime(\"%m-%B\").lower()}".to_string();
+    let mut stories_table = toml::map::Map::new();
+    stories_table.insert(
+        "include".to_string(),
+        toml::Value::Array(vec![toml::Value::String("stories".to_string())]),
+    );
+    stories_table.insert(
+        "directory".to_string(),
+        toml::Value::Array(vec![
+            toml::Value::String("{scrapmf_root}".to_string()),
+            toml::Value::String("{category}".to_string()),
+            toml::Value::String("{username}".to_string()),
+            toml::Value::String("stories".to_string()),
+            toml::Value::String(stories_year),
+            toml::Value::String(stories_month),
+        ]),
+    );
+    stories_table.insert(
+        "filename".to_string(),
+        toml::Value::String("{date:%Y-%m-%d}_{num:02d}.{extension}".to_string()),
+    );
+    extractor.insert(
+        "facebook:stories".to_string(),
+        toml::Value::Table(stories_table),
+    );
+
+    let site = Site {
+        site: Some("facebook".to_string()),
+        pattern: Some("facebook.com".to_string()),
+        patterns: vec![
+            "facebook.com".to_string(),
+            "fb.com".to_string(),
+            "m.facebook.com".to_string(),
+        ],
+        output_dir: None,
+        extra_args: vec!["--restrict-filenames".to_string(), "auto".to_string()],
+        cookies: None,
+        cookies_from_browser: Some("brave".to_string()),
+        cookie_profile: None,
+        rate_limit: Some(RateLimit {
+            sleep: Some("3-6".to_string()),
+            sleep_request: Some("8-15".to_string()),
+            sleep_429: Some(120),
+            limit_rate: None,
+        }),
+        archive: None,
+        extractor,
+        filename_template: None,
+        directory_template: None,
+    };
+    let body = toml::to_string_pretty(&site).context("serialize facebook site")?;
+    let header = r#"# scrapmf — site config — facebook
+# File: ~/.config/scrapmf/sites/facebook.toml (0o600, dir 0o700)
+# Gallery-dl 1.32.9: facebook:user dispatches photos/albums/avatar/info; set/video handle albums/videos.
+# Auth: siempre requiere sesión (c_user/xs) — brave cookies o --cookies file (no anon como vsco).
+# Destacadas/Historias: placeholders facebook:highlights/stories separados como instagram:highlights/stories
+#   hasta que gallery-dl exponga facebook:highlights/stories; mientras galeria-dl las ignora sin romper.
+# Árbol: PERFIL/facebook/CUENTA/{photos,albums/<title (set)/>,videos,profile,highlights/{id}{title},stories/<year>/<month>}
+#   Publicaciones → photos/ {date}_{id}_{num}.{ext}
+#   Álbumes → albums/{title (set)}/{id}.{ext}
+#   Videos → videos/ {date}_{id}.{ext}
+#   Perfil → profile/ {username}_{id}.{ext}
+#   Destacadas → highlights/{id}{title:?_//}/{id}.{ext} (como instagram highlights)
+#   Historias → stories/<year>/<month>/ {date}_{num}.{ext} (efímeras)
+"#;
+    let content = format!("{header}{body}");
+    write_config_file(&target, &content)
+}
+
 /// Serialize a profile to `path` with doc header and 0o600 perms.
 pub fn write_profile_file(path: &Path, profile: &Profile) -> anyhow::Result<()> {
     let body = toml::to_string_pretty(profile).context("serialize profile")?;

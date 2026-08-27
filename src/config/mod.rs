@@ -17,8 +17,8 @@ pub use migrations::{
     migrate_legacy_placeholders,
 };
 pub use templates::{
-    ensure_example_sites, ensure_threads_site, ensure_tiktok_site, ensure_twitter_site,
-    ensure_vsco_site, write_profile_file,
+    ensure_example_sites, ensure_facebook_site, ensure_threads_site, ensure_tiktok_site,
+    ensure_twitter_site, ensure_vsco_site, write_profile_file,
 };
 
 fn expand_tilde(path: &Path) -> PathBuf {

@@ -84,6 +84,19 @@ pub fn site_account_from_url(url: &str) -> Option<(String, String)> {
         "threads.com" | "threads.net" => seg(0)
             .and_then(|u| u.strip_prefix('@'))
             .map(|u| ("threads".into(), u.into())),
+        "facebook.com" | "fb.com" | "m.facebook.com" => seg(0).map(|u| {
+            // strip profile.php?id= and people/ prefixes like gallery-dl USER_PATTERN
+            let mut s = u;
+            if let Some(id) = s.strip_prefix("profile.php?id=") {
+                s = id.split('&').next().unwrap_or(id);
+            } else if let Some(rest) = s.strip_prefix("people/") {
+                s = rest.split('/').next().unwrap_or(rest);
+            }
+            (
+                "facebook".into(),
+                s.split('?').next().unwrap_or(s).to_string(),
+            )
+        }),
         _ => None,
     }
 }

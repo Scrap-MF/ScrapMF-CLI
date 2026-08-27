@@ -249,6 +249,18 @@ pub fn sub_url_label(url: &str) -> &'static str {
     if url.contains("/reels/") {
         return "reels";
     }
+    if url.contains("/photos_albums") {
+        return "albums";
+    }
+    if url.contains("/photos") {
+        return "photos";
+    }
+    if url.contains("/videos") {
+        return "videos";
+    }
+    if url.contains("/avatar") {
+        return "profile";
+    }
     // Profile root passes and threads base URLs download the media feed.
     "posts"
 }

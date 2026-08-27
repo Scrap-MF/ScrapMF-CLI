@@ -651,7 +651,8 @@ pub(super) fn prompt_quick_scrape() {
     let cfg = config::load().unwrap_or_default();
 
     // Site selection from sites/*.toml (+ fallbacks)
-    let site_opts = site_options_with_fallbacks(&["instagram", "tiktok", "twitter", "vsco"]);
+    let site_opts =
+        site_options_with_fallbacks(&["instagram", "tiktok", "twitter", "vsco", "facebook"]);
 
     let items: Vec<crate::cli::interactive::theme::SiteItem> = site_opts
         .into_iter()
