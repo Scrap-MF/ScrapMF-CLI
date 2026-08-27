@@ -123,7 +123,7 @@ pub(super) fn build_tagged_urls(site: &str, username: &str) -> Vec<(ContentKind,
         "facebook" => vec![
             (
                 ContentKind::Posts,
-                format!("https://www.facebook.com/{username}/"),
+                format!("https://www.facebook.com/{username}/photos"),
             ),
             (
                 ContentKind::Albums,
@@ -131,7 +131,7 @@ pub(super) fn build_tagged_urls(site: &str, username: &str) -> Vec<(ContentKind,
             ),
             (
                 ContentKind::Videos,
-                format!("https://www.facebook.com/{username}/videos"),
+                format!("https://www.facebook.com/{username}/videos/"),
             ),
             (
                 ContentKind::Profile,

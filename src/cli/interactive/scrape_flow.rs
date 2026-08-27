@@ -822,7 +822,7 @@ pub(super) fn prompt_quick_scrape() {
         vec![
             (
                 ContentKind::Posts,
-                format!("https://www.facebook.com/profile.php?id={id}"),
+                format!("https://www.facebook.com/profile.php?id={id}/photos"),
             ),
             (
                 ContentKind::Albums,
