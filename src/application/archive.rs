@@ -96,6 +96,9 @@ pub fn site_account_from_url(url: &str) -> Option<(String, String)> {
             .filter(|u| !matches!(*u, "i" | "home" | "explore" | "search"))
             .map(|u| ("twitter".into(), u.into())),
         "vsco.co" => seg(0).map(|u| ("vsco".into(), u.into())),
+        "threads.com" | "threads.net" => seg(0)
+            .and_then(|u| u.strip_prefix('@'))
+            .map(|u| ("threads".into(), u.into())),
         _ => None,
     }
 }
