@@ -661,8 +661,38 @@ pub(super) fn prompt_quick_scrape() {
         return;
     };
     let site_name = selected.key();
-    let Some(username) = ask_nonempty("Username (without @):") else {
-        return;
+    let raw_input = match ask_nonempty("Username or ID (without @):") {
+        Some(s) => s,
+        None => return,
+    };
+    // Instagram: allow numeric ID, resolve to username so folder is username
+    let username = if site_name == "instagram"
+        && crate::application::instagram_resolver::is_id_like(&raw_input)
+    {
+        let id = crate::application::instagram_resolver::normalize_id(&raw_input);
+        let site_cfg_tmp = cfg.sites.get(site_name.as_str()).cloned();
+        let cookies_file_tmp = site_cfg_tmp.as_ref().and_then(|s| s.cookies.clone());
+        let cookies_browser_tmp = site_cfg_tmp
+            .as_ref()
+            .and_then(|s| s.cookies_from_browser.clone());
+        match crate::application::instagram_resolver::resolve_instagram_username(
+            &id,
+            cookies_file_tmp.as_deref(),
+            cookies_browser_tmp.as_deref(),
+        ) {
+            Ok(u) => {
+                println!("→ ID → @{} (resuelto)", u);
+                u
+            }
+            Err(e) => {
+                crate::output::print_error(&format!(
+                    "no se pudo resolver ID a username: {e} — verifica el ID y que la sesión de IG esté vigente"
+                ));
+                return;
+            }
+        }
+    } else {
+        raw_input.trim().trim_start_matches('@').to_string()
     };
 
     // Content menu — single account, direct prompt
