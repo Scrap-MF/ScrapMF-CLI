@@ -682,7 +682,9 @@ pub fn ensure_facebook_site() -> anyhow::Result<()> {
         if let Ok(existing) = std::fs::read_to_string(&target) {
             let has_user = existing.contains("facebook:user");
             let has_set = existing.contains("facebook:set");
-            let has_photo = existing.contains("facebook:photo");
+            let has_photo = existing.contains("facebook:photo")
+                && existing.contains("include")
+                && existing.contains("\"photo\"");
             let has_avatar =
                 existing.contains("facebook:avatar") && existing.contains("{username}_{id}");
             let has_highlights = existing.contains("facebook:highlights");
@@ -827,8 +829,12 @@ pub fn ensure_facebook_site() -> anyhow::Result<()> {
     );
     extractor.insert("facebook:set".to_string(), toml::Value::Table(set_table));
 
-    // facebook:photo — single photo
+    // facebook:photo — single photo (photo/?fbid=ID without set_id)
     let mut photo_table = toml::map::Map::new();
+    photo_table.insert(
+        "include".to_string(),
+        toml::Value::Array(vec![toml::Value::String("photo".to_string())]),
+    );
     photo_table.insert(
         "directory".to_string(),
         toml::Value::Array(vec![
