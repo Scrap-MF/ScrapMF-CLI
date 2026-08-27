@@ -772,60 +772,6 @@ pub fn ensure_facebook_site() -> anyhow::Result<()> {
         toml::Value::Table(avatar_table),
     );
 
-    // facebook:highlights — destacadas (featured), separadas como instagram:highlights
-    // Placeholder hasta que gallery-dl exponga facebook:highlights/stories; usa id+title como instagram post_id+highlight_title
-    let mut highlights_table = toml::map::Map::new();
-    highlights_table.insert(
-        "include".to_string(),
-        toml::Value::Array(vec![toml::Value::String("highlights".to_string())]),
-    );
-    highlights_table.insert(
-        "directory".to_string(),
-        toml::Value::Array(vec![
-            toml::Value::String("{scrapmf_root}".to_string()),
-            toml::Value::String("{category}".to_string()),
-            toml::Value::String("{username}".to_string()),
-            toml::Value::String("highlights".to_string()),
-            toml::Value::String("{id}{title:?_//}".to_string()),
-        ]),
-    );
-    highlights_table.insert(
-        "filename".to_string(),
-        toml::Value::String("{id}.{extension}".to_string()),
-    );
-    extractor.insert(
-        "facebook:highlights".to_string(),
-        toml::Value::Table(highlights_table),
-    );
-
-    // facebook:stories — historias (efímeras), como instagram:stories con fecha
-    let stories_year = "\\fF {date.strftime(\"%Y\")}".to_string();
-    let stories_month = "\\fF {date.strftime(\"%m-%B\").lower()}".to_string();
-    let mut stories_table = toml::map::Map::new();
-    stories_table.insert(
-        "include".to_string(),
-        toml::Value::Array(vec![toml::Value::String("stories".to_string())]),
-    );
-    stories_table.insert(
-        "directory".to_string(),
-        toml::Value::Array(vec![
-            toml::Value::String("{scrapmf_root}".to_string()),
-            toml::Value::String("{category}".to_string()),
-            toml::Value::String("{username}".to_string()),
-            toml::Value::String("stories".to_string()),
-            toml::Value::String(stories_year),
-            toml::Value::String(stories_month),
-        ]),
-    );
-    stories_table.insert(
-        "filename".to_string(),
-        toml::Value::String("{date:%Y-%m-%d}_{num:02d}.{extension}".to_string()),
-    );
-    extractor.insert(
-        "facebook:stories".to_string(),
-        toml::Value::Table(stories_table),
-    );
-
     let site = Site {
         site: Some("facebook".to_string()),
         pattern: Some("facebook.com".to_string()),
@@ -855,15 +801,11 @@ pub fn ensure_facebook_site() -> anyhow::Result<()> {
 # File: ~/.config/scrapmf/sites/facebook.toml (0o600, dir 0o700)
 # Gallery-dl 1.32.9: facebook:user dispatches photos/albums/avatar/info; set/video handle albums/videos.
 # Auth: siempre requiere sesión (c_user/xs) — brave cookies o --cookies file (no anon como vsco).
-# Destacadas/Historias: placeholders facebook:highlights/stories separados como instagram:highlights/stories
-#   hasta que gallery-dl exponga facebook:highlights/stories; mientras galeria-dl las ignora sin romper.
-# Árbol: PERFIL/facebook/CUENTA/{photos,albums/<title (set)/>,videos,profile,highlights/{id}{title},stories/<year>/<month>}
+# Árbol: PERFIL/facebook/CUENTA/{photos,albums/<title (set)/>,videos,profile}
 #   Publicaciones → photos/ {date}_{id}_{num}.{ext}
 #   Álbumes → albums/{title (set)}/{id}.{ext}
 #   Videos → videos/ {date}_{id}.{ext}
 #   Perfil → profile/ {username}_{id}.{ext}
-#   Destacadas → highlights/{id}{title:?_//}/{id}.{ext} (como instagram highlights)
-#   Historias → stories/<year>/<month>/ {date}_{num}.{ext} (efímeras)
 "#;
     let content = format!("{header}{body}");
     write_config_file(&target, &content)

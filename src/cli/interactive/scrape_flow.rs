@@ -11,18 +11,36 @@ use super::{ask_nonempty, select_menu};
 
 /// Ask whether this run should use a named cookie profile instead of the
 /// site defaults. Returns the profile path when overridden.
-pub(super) fn prompt_cookie_override() -> Option<PathBuf> {
+pub(super) fn prompt_cookie_override(site: &str) -> Option<PathBuf> {
     use crate::config::cookies;
     let profiles = cookies::list_profiles();
-    if profiles.is_empty() {
-        return None; // nothing to choose — keep site defaults
-    }
+    // Filter profiles to those that actually contain cookies for this site
+    let site_domains = cookies::domains_for_site(site);
+    let filtered: Vec<String> = profiles
+        .into_iter()
+        .filter(|name| {
+            if site_domains.is_empty() {
+                return true;
+            }
+            match cookies::load_profile(name) {
+                Ok(cookies) => cookies.iter().any(|c| {
+                    site_domains
+                        .iter()
+                        .any(|d| c.domain == *d || c.domain.ends_with(&format!(".{d}")))
+                }),
+                Err(_) => false,
+            }
+        })
+        .collect();
+    // Always offer at least Default, even if no matching profiles
     let mut opts = vec!["Default (from site config)".to_string()];
     opts.extend(
-        profiles
+        filtered
             .iter()
             .map(|p| format!("{p}  — {}", cookies::profile_summary(p).unwrap_or_default())),
     );
+    // If only Default and no filtered profiles, still prompt so user sees the choice
+    // (previous behavior returned None without prompting, which hid the cookie step)
     let Ok(choice) = select_menu("Cookies for this run?", opts).prompt() else {
         return None;
     };
@@ -607,7 +625,7 @@ pub(super) fn prompt_scrape_direct_urls() {
 
     // Per-run cookie override (named profile instead of site defaults)
     let cookie_override = if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-        prompt_cookie_override()
+        prompt_cookie_override("")
     } else {
         None
     };
@@ -738,7 +756,7 @@ pub(super) fn prompt_quick_scrape() {
     // Per-run cookie override comes BEFORE ID resolution so resolver uses
     // the same session that will be used for downloading (same cycle as username).
     let cookie_override = if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-        prompt_cookie_override()
+        prompt_cookie_override(&site_name)
     } else {
         None
     };
