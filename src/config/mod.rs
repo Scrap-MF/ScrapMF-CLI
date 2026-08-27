@@ -66,8 +66,40 @@ pub fn resolve_site<'a>(
         .find(|(_, site)| site_matches(site, url))
 }
 
+use std::sync::{Arc, Mutex, OnceLock};
+
+fn config_cache() -> &'static Mutex<Option<Arc<Config>>> {
+    static CACHE: OnceLock<Mutex<Option<Arc<Config>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Clear the in-memory config cache (called after save/update and in tests).
+pub fn clear_cache() {
+    if let Ok(mut g) = config_cache().lock() {
+        *g = None;
+    }
+}
+
 /// Load config from XDG `~/.config/scrapmf/config.toml` and presets from `presets/**/*.toml`.
 pub fn load() -> anyhow::Result<Config> {
+    // Fast path: use cached config if available (skip FS scans). Bypass in
+    // tests so each test can use its own isolated temp XDG dir.
+    if !cfg!(test)
+        && let Ok(guard) = config_cache().lock()
+        && let Some(cached) = guard.clone()
+    {
+        return Ok((*cached).clone());
+    }
+    let cfg = load_inner()?;
+    if !cfg!(test)
+        && let Ok(mut guard) = config_cache().lock()
+    {
+        *guard = Some(Arc::new(cfg.clone()));
+    }
+    Ok(cfg)
+}
+
+fn load_inner() -> anyhow::Result<Config> {
     // One-time migration: inline [sites]/[presets]/[profiles] → separate files.
     // Idempotent and cheap (early return if no inline tables).
     let _ = migrations::migrate_inline_config_to_files();
@@ -219,7 +251,9 @@ pub fn save(cfg: &Config) -> anyhow::Result<()> {
         fs::restrict_perms(parent, true);
     }
     let content = toml::to_string_pretty(cfg).context("serialize config")?;
-    write_config_file(&path, &content)
+    write_config_file(&path, &content)?;
+    clear_cache();
+    Ok(())
 }
 
 /// Load, mutate in place, and persist the main config.

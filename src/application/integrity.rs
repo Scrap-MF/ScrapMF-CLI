@@ -252,28 +252,51 @@ pub fn quality_summary(reported_paths: &[String]) -> Option<String> {
     Some(format!("quality: {}", parts.join(", ")))
 }
 
-/// Streamed search for the byte pattern `moov` inside a file.
+/// Streamed search for the byte pattern `moov` inside a file — zero-alloc.
 fn contains_moov(path: &Path) -> bool {
-    const PATTERN: &[u8; 4] = b"moov";
-    const CHUNK: usize = 1024 * 1024;
+    use std::sync::OnceLock;
+    static FINDER: OnceLock<memchr::memmem::Finder> = OnceLock::new();
+    let finder = FINDER.get_or_init(|| memchr::memmem::Finder::new(b"moov"));
+    const CHUNK: usize = 64 * 1024;
     let Ok(mut f) = std::fs::File::open(path) else {
-        return false; // unreadable: don't flag it here, other checks cover it
+        return false;
     };
-    let mut prev_tail: Vec<u8> = Vec::new();
     let mut buf = [0u8; CHUNK];
+    let mut tail = [0u8; 3];
+    let mut tail_len: usize = 0;
     loop {
-        match f.read(&mut buf) {
+        let n = match f.read(&mut buf) {
             Ok(0) => return false,
-            Ok(n) => {
-                let mut hay = Vec::with_capacity(prev_tail.len() + n);
-                hay.extend_from_slice(&prev_tail);
-                hay.extend_from_slice(&buf[..n]);
-                if hay.windows(4).any(|w| w == PATTERN) {
-                    return true;
-                }
-                prev_tail = hay[hay.len().saturating_sub(3)..].to_vec();
-            }
+            Ok(n) => n,
             Err(_) => return false,
+        };
+        // Check boundary crossing (tail + buf prefix) without large alloc
+        if tail_len > 0 {
+            let mut boundary = [0u8; 6];
+            boundary[..tail_len].copy_from_slice(&tail[..tail_len]);
+            let take = n.min(3);
+            boundary[tail_len..tail_len + take].copy_from_slice(&buf[..take]);
+            if finder.find(&boundary[..tail_len + take]).is_some() {
+                return true;
+            }
+        }
+        if finder.find(&buf[..n]).is_some() {
+            return true;
+        }
+        // Keep last 3 bytes for next iteration
+        if n >= 3 {
+            tail.copy_from_slice(&buf[n - 3..n]);
+            tail_len = 3;
+        } else {
+            // n < 3: need to shift tail and append
+            let mut new_tail = [0u8; 3];
+            let keep = tail_len.min(3 - n);
+            if keep > 0 {
+                new_tail[..keep].copy_from_slice(&tail[tail_len - keep..tail_len]);
+            }
+            new_tail[keep..keep + n].copy_from_slice(&buf[..n]);
+            tail = new_tail;
+            tail_len = (tail_len + n).min(3);
         }
     }
 }

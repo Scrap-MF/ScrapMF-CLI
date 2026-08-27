@@ -1336,6 +1336,7 @@ dependencies = [
  "crossterm 0.28.1",
  "dirs",
  "inquire",
+ "memchr",
  "pbkdf2",
  "ratatui",
  "rusqlite",

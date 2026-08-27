@@ -59,9 +59,28 @@ where
 pub struct Executor;
 
 impl Executor {
-    /// Find binary in $PATH via `which` crate.
+    /// Find binary in $PATH via `which` crate — cached to avoid repeated
+    /// `stat` per `PATH` entry for every sub-URL (5+ calls per job).
     pub fn find_binary(name: &str) -> Option<std::path::PathBuf> {
-        which::which(name).ok()
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+        use std::sync::{Mutex, OnceLock};
+        static CACHE: OnceLock<Mutex<HashMap<String, Option<PathBuf>>>> = OnceLock::new();
+        // Bypass cache in tests so temp binaries created mid-test are found
+        if cfg!(test) {
+            return which::which(name).ok();
+        }
+        let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Ok(guard) = cache.lock()
+            && let Some(cached) = guard.get(name)
+        {
+            return cached.clone();
+        }
+        let res = which::which(name).ok();
+        if let Ok(mut guard) = cache.lock() {
+            guard.insert(name.to_string(), res.clone());
+        }
+        res
     }
 
     /// Run with checked errors: maps NotFound to BackendNotFound with help, and non-zero to BackendFailed.
