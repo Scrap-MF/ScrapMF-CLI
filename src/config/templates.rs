@@ -678,12 +678,16 @@ pub fn ensure_facebook_site() -> anyhow::Result<()> {
     crate::config::fs::restrict_perms(&dir, true);
     let target = dir.join("facebook.toml");
     if target.exists() {
-        // Migrate outdated facebook.toml (pre-highlights removal, missing facebook:user)
+        // Migrate outdated facebook.toml (missing facebook:user/set/photo or with highlights/stories)
         if let Ok(existing) = std::fs::read_to_string(&target) {
             let has_user = existing.contains("facebook:user");
+            let has_set = existing.contains("facebook:set");
+            let has_photo = existing.contains("facebook:photo");
+            let has_avatar =
+                existing.contains("facebook:avatar") && existing.contains("{username}_{id}");
             let has_highlights = existing.contains("facebook:highlights");
             let has_stories = existing.contains("facebook:stories");
-            if has_user && !has_highlights && !has_stories {
+            if has_user && has_set && has_photo && has_avatar && !has_highlights && !has_stories {
                 return Ok(());
             }
             // Outdated — will be overwritten below with correct 4-table site
@@ -781,8 +785,12 @@ pub fn ensure_facebook_site() -> anyhow::Result<()> {
         toml::Value::Table(video_table),
     );
 
-    // facebook:avatar — perfil
+    // facebook:avatar — perfil (con username, sin set_id)
     let mut avatar_table = toml::map::Map::new();
+    avatar_table.insert(
+        "include".to_string(),
+        toml::Value::Array(vec![toml::Value::String("avatar".to_string())]),
+    );
     avatar_table.insert(
         "directory".to_string(),
         toml::Value::Array(vec![
@@ -799,6 +807,44 @@ pub fn ensure_facebook_site() -> anyhow::Result<()> {
     extractor.insert(
         "facebook:avatar".to_string(),
         toml::Value::Table(avatar_table),
+    );
+
+    // facebook:set — single set (e.g., Fotos del perfil, Fotos de portada) - ensure quick without facebook/
+    let mut set_table = toml::map::Map::new();
+    set_table.insert(
+        "directory".to_string(),
+        toml::Value::Array(vec![
+            toml::Value::String("{scrapmf_root}".to_string()),
+            toml::Value::String("{category}".to_string()),
+            toml::Value::String("{username}".to_string()),
+            toml::Value::String("albums".to_string()),
+            toml::Value::String("{title[:220]}{set_id:? (/)/}".to_string()),
+        ]),
+    );
+    set_table.insert(
+        "filename".to_string(),
+        toml::Value::String("{id}.{extension}".to_string()),
+    );
+    extractor.insert("facebook:set".to_string(), toml::Value::Table(set_table));
+
+    // facebook:photo — single photo
+    let mut photo_table = toml::map::Map::new();
+    photo_table.insert(
+        "directory".to_string(),
+        toml::Value::Array(vec![
+            toml::Value::String("{scrapmf_root}".to_string()),
+            toml::Value::String("{category}".to_string()),
+            toml::Value::String("{username}".to_string()),
+            toml::Value::String("photos".to_string()),
+        ]),
+    );
+    photo_table.insert(
+        "filename".to_string(),
+        toml::Value::String("{id}.{extension}".to_string()),
+    );
+    extractor.insert(
+        "facebook:photo".to_string(),
+        toml::Value::Table(photo_table),
     );
 
     let site = Site {
