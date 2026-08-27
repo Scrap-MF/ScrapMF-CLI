@@ -69,8 +69,8 @@ pub fn site_account_from_url(url: &str) -> Option<(String, String)> {
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
     let rest = rest.strip_prefix("www.").unwrap_or(rest);
-    let (host, path) = rest.split_once('/')?;
-    let path = path.split(['?', '#']).next().unwrap_or(path);
+    let (host, full_path) = rest.split_once('/')?;
+    let path = full_path.split(['?', '#']).next().unwrap_or(full_path);
     let seg = |i: usize| path.split('/').nth(i).filter(|s| !s.is_empty());
     match host {
         "instagram.com" => seg(0).map(|u| ("instagram".into(), u.trim_end_matches('/').into())),
@@ -84,19 +84,37 @@ pub fn site_account_from_url(url: &str) -> Option<(String, String)> {
         "threads.com" | "threads.net" => seg(0)
             .and_then(|u| u.strip_prefix('@'))
             .map(|u| ("threads".into(), u.into())),
-        "facebook.com" | "fb.com" | "m.facebook.com" => seg(0).map(|u| {
-            // strip profile.php?id= and people/ prefixes like gallery-dl USER_PATTERN
-            let mut s = u;
-            if let Some(id) = s.strip_prefix("profile.php?id=") {
-                s = id.split('&').next().unwrap_or(id);
-            } else if let Some(rest) = s.strip_prefix("people/") {
-                s = rest.split('/').next().unwrap_or(rest);
+        h if h == "facebook.com"
+            || h == "fb.com"
+            || h == "m.facebook.com"
+            || h.ends_with(".facebook.com") =>
+        {
+            // Use full_path (with query) for profile.php?id= and people/Name/ID
+            if let Some(pos) = full_path.find("profile.php?id=") {
+                let after = &full_path[pos + "profile.php?id=".len()..];
+                let id = after.split(['&', '/', '?', '#']).next().unwrap_or(after);
+                if !id.is_empty() {
+                    return Some(("facebook".into(), id.to_string()));
+                }
             }
-            (
-                "facebook".into(),
-                s.split('?').next().unwrap_or(s).to_string(),
-            )
-        }),
+            if full_path.starts_with("people/") {
+                let parts: Vec<&str> = full_path.split('/').collect();
+                // people/Name/ID or people/ID
+                if parts.len() >= 3 {
+                    let id = parts[2].split(['?', '#', '&']).next().unwrap_or(parts[2]);
+                    if !id.is_empty() {
+                        return Some(("facebook".into(), id.to_string()));
+                    }
+                }
+                if parts.len() >= 2 {
+                    let id = parts[1].split(['?', '#', '&']).next().unwrap_or(parts[1]);
+                    if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) {
+                        return Some(("facebook".into(), id.to_string()));
+                    }
+                }
+            }
+            seg(0).map(|u| ("facebook".into(), u.to_string()))
+        }
         _ => None,
     }
 }

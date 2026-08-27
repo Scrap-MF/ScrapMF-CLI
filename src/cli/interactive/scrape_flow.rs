@@ -662,21 +662,48 @@ pub(super) fn prompt_quick_scrape() {
         return;
     };
     let site_name = selected.key();
-    let raw_input = match ask_nonempty("Username or ID (without @):") {
+    let prompt_text = if site_name == "facebook" {
+        "ID o URL del perfil (ej. 123..., https://www.facebook.com/profile.php?id=...):"
+    } else if site_name == "instagram" {
+        "Username or ID (without @):"
+    } else {
+        "Username (without @):"
+    };
+    let raw_input = match ask_nonempty(prompt_text) {
         Some(s) => s,
         None => return,
     };
-    let raw_is_id =
-        site_name == "instagram" && crate::application::instagram_resolver::is_id_like(&raw_input);
-    let raw_id = if raw_is_id {
-        crate::application::instagram_resolver::normalize_id(&raw_input)
+    // Facebook: accept ID or full profile URL (profile.php?id=, people/Name/ID, fb.com, etc.)
+    // Instagram: accept ID (7-19 digits) as before. Both resolve ID → username.
+    let (raw_is_id, raw_id, display_for_menu) = if site_name == "instagram"
+        && crate::application::instagram_resolver::is_id_like(&raw_input)
+    {
+        let id = crate::application::instagram_resolver::normalize_id(&raw_input);
+        (true, id.clone(), id)
+    } else if site_name == "facebook" {
+        if let Some(extracted) =
+            crate::application::facebook_resolver::extract_identifier(&raw_input)
+        {
+            let is_id = crate::application::facebook_resolver::is_id_like(&extracted);
+            if is_id {
+                let nid = crate::application::facebook_resolver::normalize_id(&extracted);
+                (true, nid.clone(), nid)
+            } else {
+                (false, String::new(), extracted)
+            }
+        } else {
+            (
+                false,
+                String::new(),
+                raw_input.trim().trim_start_matches('@').to_string(),
+            )
+        }
     } else {
-        String::new()
-    };
-    let display_for_menu = if raw_is_id {
-        raw_id.clone()
-    } else {
-        raw_input.trim().trim_start_matches('@').to_string()
+        (
+            false,
+            String::new(),
+            raw_input.trim().trim_start_matches('@').to_string(),
+        )
     };
 
     // Content menu — same cycle as username (choose content before cookies/resolve)
@@ -729,18 +756,30 @@ pub(super) fn prompt_quick_scrape() {
 
     // Now resolve ID → username if needed, using the final cookies
     let username = if raw_is_id {
-        match crate::application::instagram_resolver::resolve_instagram_username(
-            &raw_id,
-            cookies_file_for_resolve,
-            cookies_browser_for_resolve,
-        ) {
+        let res = if site_name == "instagram" {
+            crate::application::instagram_resolver::resolve_instagram_username(
+                &raw_id,
+                cookies_file_for_resolve,
+                cookies_browser_for_resolve,
+            )
+        } else if site_name == "facebook" {
+            crate::application::facebook_resolver::resolve_facebook_id_to_username(
+                &raw_id,
+                cookies_file_for_resolve,
+                cookies_browser_for_resolve,
+            )
+        } else {
+            Err(anyhow::anyhow!("unsupported site for ID"))
+        };
+        match res {
             Ok(u) => {
                 println!("→ {} → @{} (resuelto)", raw_id, u);
                 u
             }
             Err(e) => {
+                let site_label = if site_name == "facebook" { "FB" } else { "IG" };
                 crate::output::print_error(&format!(
-                    "no se pudo resolver ID a username: {e} — verifica el ID y que la sesión de IG esté vigente"
+                    "no se pudo resolver ID a username: {e} — verifica el ID y que la sesión de {site_label} esté vigente"
                 ));
                 crate::output::print_help("nota: el error queda visible hasta que presiones Enter");
                 let _ = Text::new("Presiona Enter para volver")
