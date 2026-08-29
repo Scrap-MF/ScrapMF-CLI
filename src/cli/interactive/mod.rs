@@ -4,27 +4,8 @@ use std::io::Write;
 pub(super) fn clear_screen() {
     print!("\x1B[2J\x1B[H");
     let _ = std::io::stdout().flush();
-    if theme::colors_enabled() {
-        let name = anstyle::Style::new()
-            .fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Cyan)))
-            .bold();
-        let ver =
-            anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Magenta)));
-        println!(
-            "{}  ▄▅▆▇ {} v{}{}{} — by MFApplications",
-            anstyle::Reset.render(),
-            name.render(),
-            ver.render(),
-            env!("CARGO_PKG_VERSION"),
-            anstyle::Reset.render()
-        );
-    } else {
-        println!(
-            "  ▄▅▆▇ scrapmf v{} — by MFApplications",
-            env!("CARGO_PKG_VERSION")
-        );
-    }
-    println!("  ───────────────────────────────────────");
+    // Header eliminated — all menus now live inside the Browser box
+    // `╭ SCRAPMF vX.Y.Z ─ {context} ─╮`. No ▄▅▆▇ printed here.
 }
 
 /// Standard option menu: clears the screen first (no stacked prompt residue)

@@ -30,10 +30,16 @@ pub(super) fn prompt_scrape_as_profile() {
         println!("ℹ No profiles yet — create one via Configuration → Manage Profiles");
         return;
     }
-    let profile_choice = match select_menu("Choose profile:", profile_names.clone()).prompt() {
-        Ok(c) => c,
-        Err(_) => return,
+    let Some(idx) = crate::cli::interactive::menu::pick_single(
+        "Choose profile",
+        profile_names
+            .iter()
+            .map(|n| (n.clone(), vec![format!("profile: {n}")]))
+            .collect(),
+    ) else {
+        return;
     };
+    let profile_choice = profile_names[idx].clone();
     let Some(profile) = cfg.profiles.get(&profile_choice).cloned() else {
         return;
     };
