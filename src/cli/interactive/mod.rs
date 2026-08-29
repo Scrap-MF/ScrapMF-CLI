@@ -128,6 +128,7 @@ pub(crate) mod browser;
 mod content;
 pub(crate) mod doctor_view;
 pub(crate) mod home;
+pub mod menu;
 pub(crate) mod plugins_menu;
 mod profiles;
 mod scrape_flow;

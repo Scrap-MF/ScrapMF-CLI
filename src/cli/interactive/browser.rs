@@ -184,11 +184,20 @@ fn run_browser(title: &str, entries: &[Entry], mode: Mode, prechecked: &[usize])
                     Line::styled(format!("{prefix}{}", e.label), style)
                 })
                 .collect();
-            let nav_title = format!(" {title} ");
+            // Fixed chrome: always SCRAPMF vX.Y.Z, context appended as " ─ {context}"
+            let chrome = {
+                let ver = env!("CARGO_PKG_VERSION");
+                let base = format!("SCRAPMF v{ver}");
+                if title.is_empty() || title == base || title.starts_with("SCRAPMF v") {
+                    format!(" {title} ")
+                } else {
+                    format!(" SCRAPMF v{ver} ─ {title} ")
+                }
+            };
             let nav = Paragraph::new(rows).block(
                 Block::bordered()
                     .border_set(ratatui::symbols::border::ROUNDED)
-                    .title(nav_title),
+                    .title(chrome),
             );
             f.render_widget(nav, chunks[0]);
 

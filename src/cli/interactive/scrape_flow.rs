@@ -679,14 +679,27 @@ pub(super) fn prompt_quick_scrape() {
     let site_opts =
         site_options_with_fallbacks(&["instagram", "tiktok", "twitter", "vsco", "facebook"]);
 
-    let items: Vec<crate::cli::interactive::theme::SiteItem> = site_opts
-        .into_iter()
-        .map(crate::cli::interactive::theme::SiteItem::new)
+    // Decorated Browser with fixed chrome `╭ SCRAPMF v1.7.0 ─ Download content ─╮`
+    let opts: Vec<(String, Vec<String>)> = site_opts
+        .iter()
+        .map(|k| {
+            let spec = crate::sites::registry::find_by_id(k);
+            let details = if let Some(s) = spec {
+                vec![
+                    format!("pattern: {}", s.patterns.join(", ")),
+                    format!("backend: {:?}", s.backend),
+                    format!("kinds: {}", s.content_kinds.join(", ")),
+                ]
+            } else {
+                vec!["custom site (sites/*.toml)".to_string()]
+            };
+            (crate::cli::interactive::theme::brand_site_label(k), details)
+        })
         .collect();
-    let Ok(selected) = super::select_menu("Site:", items).prompt() else {
+    let Some(idx) = crate::cli::interactive::menu::pick_single("Download content", opts) else {
         return;
     };
-    let site_name = selected.key();
+    let site_name = site_opts[idx].clone();
     let prompt_text = if site_name == "facebook" {
         "ID o URL del perfil (ej. 123..., https://www.facebook.com/profile.php?id=...):"
     } else if site_name == "instagram" {
