@@ -103,31 +103,39 @@ pub fn input_text(context: &str, prompt: &str, placeholder: &str, help: &str) ->
     while !confirmed && !cancelled {
         let _ = terminal.draw(|f| {
             let area = f.area();
-            let chunks = Layout::vertical([
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Length(1),
-            ])
-            .split(area);
-
             let block = Block::bordered()
                 .border_set(ratatui::symbols::border::ROUNDED)
                 .title(format!(" {title} "));
+            let inner = block.inner(area);
             f.render_widget(block, area);
 
-            // Prompt line
+            let chunks = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+
+            // Prompt line inside box
             let prompt_line =
                 Line::styled(format!("◆ {prompt}"), Style::default().fg(Color::Magenta));
             f.render_widget(Paragraph::new(vec![prompt_line]), chunks[0]);
+            f.render_widget(
+                Paragraph::new(Line::styled(
+                    "─".repeat(inner.width as usize),
+                    Style::default().fg(Color::DarkGray),
+                )),
+                chunks[1],
+            );
 
-            // Input line with cursor
+            // Input line with cursor — wrap placeholder/input to avoid cutting
             let display = if input.is_empty() && !placeholder.is_empty() {
                 Line::styled(
                     format!("  {placeholder}"),
                     Style::default().fg(Color::DarkGray),
                 )
             } else {
-                // Render input with cursor as underline
                 let before: String = input.chars().take(cursor).collect();
                 let at = input.chars().nth(cursor).unwrap_or(' ');
                 let after: String = input.chars().skip(cursor + 1).collect();
@@ -150,13 +158,17 @@ pub fn input_text(context: &str, prompt: &str, placeholder: &str, help: &str) ->
                     ])
                 }
             };
-            f.render_widget(Paragraph::new(vec![display]), chunks[1]);
+            f.render_widget(
+                Paragraph::new(vec![display]).wrap(ratatui::widgets::Wrap { trim: true }),
+                chunks[2],
+            );
 
-            // Help
+            // Help inside box bottom
             if !help.is_empty() {
                 f.render_widget(
-                    Paragraph::new(Line::styled(help, Style::default().fg(Color::DarkGray))),
-                    chunks[2],
+                    Paragraph::new(Line::styled(help, Style::default().fg(Color::DarkGray)))
+                        .wrap(ratatui::widgets::Wrap { trim: true }),
+                    chunks[3],
                 );
             }
         });
