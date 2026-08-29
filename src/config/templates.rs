@@ -682,14 +682,12 @@ pub fn ensure_facebook_site() -> anyhow::Result<()> {
         if let Ok(existing) = std::fs::read_to_string(&target) {
             let has_user = existing.contains("facebook:user");
             let has_set = existing.contains("facebook:set");
-            let has_photo = existing.contains("facebook:photo")
-                && existing.contains("include")
-                && existing.contains("\"photo\"");
+            let has_photo = existing.contains("facebook:photo");
             let has_avatar =
                 existing.contains("facebook:avatar") && existing.contains("{username}_{id}");
             let has_highlights = existing.contains("facebook:highlights");
             let has_stories = existing.contains("facebook:stories");
-            if has_user && has_set && has_photo && has_avatar && !has_highlights && !has_stories {
+            if has_user && has_set && !has_photo && has_avatar && !has_highlights && !has_stories {
                 return Ok(());
             }
             // Outdated — will be overwritten below with correct 4-table site
@@ -828,30 +826,6 @@ pub fn ensure_facebook_site() -> anyhow::Result<()> {
         toml::Value::String("{id}.{extension}".to_string()),
     );
     extractor.insert("facebook:set".to_string(), toml::Value::Table(set_table));
-
-    // facebook:photo — single photo (photo/?fbid=ID without set_id)
-    let mut photo_table = toml::map::Map::new();
-    photo_table.insert(
-        "include".to_string(),
-        toml::Value::Array(vec![toml::Value::String("photo".to_string())]),
-    );
-    photo_table.insert(
-        "directory".to_string(),
-        toml::Value::Array(vec![
-            toml::Value::String("{scrapmf_root}".to_string()),
-            toml::Value::String("{category}".to_string()),
-            toml::Value::String("{username}".to_string()),
-            toml::Value::String("photos".to_string()),
-        ]),
-    );
-    photo_table.insert(
-        "filename".to_string(),
-        toml::Value::String("{id}.{extension}".to_string()),
-    );
-    extractor.insert(
-        "facebook:photo".to_string(),
-        toml::Value::Table(photo_table),
-    );
 
     let site = Site {
         site: Some("facebook".to_string()),
