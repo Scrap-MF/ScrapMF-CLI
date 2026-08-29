@@ -529,19 +529,14 @@ pub(super) fn auto_match_site_key(
 /// (profile page statusCode 10222), but their direct /video/<id> story
 /// links extract perfectly — so pasting links is the reliable route.
 pub(super) fn prompt_scrape_direct_urls() {
-    let raw = match Text::new("Paste URL(s) — separate with spaces or commas:")
-        .with_render_config(super::theme::render_config())
-        .with_placeholder(
-            "https://www.tiktok.com/@user/video/123 https://www.instagram.com/reel/xyz/",
-        )
-        .with_help_message("each URL is matched against your sites/*.toml patterns")
-        .prompt()
-    {
-        Ok(t) => t,
-        Err(_) => {
-            println!("canceled");
-            return;
-        }
+    let Some(raw) = crate::cli::interactive::menu::input_text(
+        "Download content ─ URL(s)",
+        "Paste URL(s) — separate with spaces or commas:",
+        "https://www.tiktok.com/@user/video/123 https://www.instagram.com/reel/xyz/",
+        "each URL is matched against your sites/*.toml patterns",
+    ) else {
+        println!("canceled");
+        return;
     };
 
     let (urls, errors) = parse_pasted_urls(&raw);
