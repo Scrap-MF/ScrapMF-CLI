@@ -636,8 +636,9 @@ pub(super) fn prompt_scrape_direct_urls() {
     preview_and_execute(jobs, &cfg);
 }
 
-/// Stems of sites/*.toml files, sorted, with the four known-network
-/// fallbacks appended when missing. Shared by quick scrape and profiles.
+/// Stems of sites/*.toml files + registry entries, sorted. Registry is the
+/// single source of truth — adding a site = one `SiteSpec` entry.
+/// Shared by quick scrape and profiles.
 pub(super) fn site_options_with_fallbacks(fallbacks: &[&str]) -> Vec<String> {
     let mut opts: Vec<String> = Vec::new();
     if let Some(dir) = crate::config::sites_dir()
@@ -649,6 +650,12 @@ pub(super) fn site_options_with_fallbacks(fallbacks: &[&str]) -> Vec<String> {
             {
                 opts.push(stem.to_string());
             }
+        }
+    }
+    // Ensure registry sites appear even without a file yet (e.g. threads before install)
+    for spec in crate::sites::registry::all_specs() {
+        if !opts.iter().any(|s| s == spec.id) {
+            opts.push(spec.id.to_string());
         }
     }
     for fb in fallbacks {

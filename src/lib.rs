@@ -7,5 +7,6 @@ pub mod output;
 pub mod plugins;
 pub mod process;
 pub mod providers;
+pub mod sites;
 pub mod ui;
 pub mod util;
