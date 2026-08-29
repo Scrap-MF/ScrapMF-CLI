@@ -395,7 +395,7 @@ pub(super) fn prompt_scrape_as_profile() {
 
 pub(super) fn prompt_new_profile_accounts(name: &str) -> crate::config::Profile {
     // Site options: configured sites first, then fallbacks, sorted
-    let site_opts = site_options_with_fallbacks(&["instagram", "tiktok"]);
+    let site_opts = site_options_with_fallbacks(&["instagram", "tiktok", "facebook"]);
 
     // NOTE: no cookie prompt here — cookies source lives in sites/*.toml
     // (cookies_from_browser) and is inherited via account > site precedence.
@@ -565,7 +565,7 @@ pub(super) fn edit_profile_menu(name: &str, path: &Path) {
                 }
             }
             "Add account" => {
-                let site_opts = site_options_with_fallbacks(&["instagram", "tiktok"]);
+                let site_opts = site_options_with_fallbacks(&["instagram", "tiktok", "facebook"]);
                 let items: Vec<crate::cli::interactive::theme::SiteItem> = site_opts
                     .into_iter()
                     .map(crate::cli::interactive::theme::SiteItem::new)

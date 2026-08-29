@@ -666,6 +666,206 @@ pub fn ensure_threads_site() -> anyhow::Result<()> {
     write_config_file(&target, &content)
 }
 
+/// Ensure sites/facebook.toml exists with 0o600 (no clobber).
+/// Facebook strategy — via gallery-dl (verified 1.32.9 via -K).
+/// Separates publicaciones/álbumes/videos/perfil + historias/destacadas (featured)
+/// like instagram:highlights (placeholders until upstream stories/highlights).
+pub fn ensure_facebook_site() -> anyhow::Result<()> {
+    let Some(dir) = sites_dir() else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    crate::config::fs::restrict_perms(&dir, true);
+    let target = dir.join("facebook.toml");
+    if target.exists() {
+        // Migrate outdated facebook.toml (missing facebook:user/set/photo or with highlights/stories)
+        if let Ok(existing) = std::fs::read_to_string(&target) {
+            let has_user = existing.contains("facebook:user");
+            let has_set = existing.contains("facebook:set");
+            let has_photo = existing.contains("facebook:photo");
+            let has_avatar =
+                existing.contains("facebook:avatar") && existing.contains("{username}_{id}");
+            let has_highlights = existing.contains("facebook:highlights");
+            let has_stories = existing.contains("facebook:stories");
+            if has_user && has_set && !has_photo && has_avatar && !has_highlights && !has_stories {
+                return Ok(());
+            }
+            // Outdated — will be overwritten below with correct 4-table site
+            let _ = std::fs::remove_file(&target);
+        } else {
+            return Ok(());
+        }
+    }
+    let mut extractor: std::collections::HashMap<String, toml::Value> =
+        std::collections::HashMap::new();
+
+    // facebook:user — publicaciones (user dispatch, same as photos feed)
+    let mut user_table = toml::map::Map::new();
+    user_table.insert(
+        "directory".to_string(),
+        toml::Value::Array(vec![
+            toml::Value::String("{scrapmf_root}".to_string()),
+            toml::Value::String("{category}".to_string()),
+            toml::Value::String("{username}".to_string()),
+            toml::Value::String("posts".to_string()),
+        ]),
+    );
+    user_table.insert(
+        "filename".to_string(),
+        toml::Value::String("{date:%Y-%m-%d}_{id}_{num:02d}.{extension}".to_string()),
+    );
+    extractor.insert("facebook:user".to_string(), toml::Value::Table(user_table));
+
+    // facebook:photos — publicaciones (feed)
+    let mut photos_table = toml::map::Map::new();
+    photos_table.insert(
+        "include".to_string(),
+        toml::Value::Array(vec![toml::Value::String("photos".to_string())]),
+    );
+    photos_table.insert(
+        "directory".to_string(),
+        toml::Value::Array(vec![
+            toml::Value::String("{scrapmf_root}".to_string()),
+            toml::Value::String("{category}".to_string()),
+            toml::Value::String("{username}".to_string()),
+            toml::Value::String("photos".to_string()),
+        ]),
+    );
+    photos_table.insert(
+        "filename".to_string(),
+        toml::Value::String("{date:%Y-%m-%d}_{id}_{num:02d}.{extension}".to_string()),
+    );
+    extractor.insert(
+        "facebook:photos".to_string(),
+        toml::Value::Table(photos_table),
+    );
+
+    // facebook:albums — álbumes (set_id + title)
+    let mut albums_table = toml::map::Map::new();
+    albums_table.insert(
+        "include".to_string(),
+        toml::Value::Array(vec![toml::Value::String("albums".to_string())]),
+    );
+    albums_table.insert(
+        "directory".to_string(),
+        toml::Value::Array(vec![
+            toml::Value::String("{scrapmf_root}".to_string()),
+            toml::Value::String("{category}".to_string()),
+            toml::Value::String("{username}".to_string()),
+            toml::Value::String("albums".to_string()),
+            toml::Value::String("{title[:220]}{set_id:? (/)/}".to_string()),
+        ]),
+    );
+    albums_table.insert(
+        "filename".to_string(),
+        toml::Value::String("{id}.{extension}".to_string()),
+    );
+    extractor.insert(
+        "facebook:albums".to_string(),
+        toml::Value::Table(albums_table),
+    );
+
+    // facebook:video — videos
+    let mut video_table = toml::map::Map::new();
+    video_table.insert(
+        "directory".to_string(),
+        toml::Value::Array(vec![
+            toml::Value::String("{scrapmf_root}".to_string()),
+            toml::Value::String("{category}".to_string()),
+            toml::Value::String("{username}".to_string()),
+            toml::Value::String("videos".to_string()),
+        ]),
+    );
+    video_table.insert(
+        "filename".to_string(),
+        toml::Value::String("{date:%Y-%m-%d}_{id}.{extension}".to_string()),
+    );
+    extractor.insert(
+        "facebook:video".to_string(),
+        toml::Value::Table(video_table),
+    );
+
+    // facebook:avatar — perfil (con username, sin set_id)
+    let mut avatar_table = toml::map::Map::new();
+    avatar_table.insert(
+        "include".to_string(),
+        toml::Value::Array(vec![toml::Value::String("avatar".to_string())]),
+    );
+    avatar_table.insert(
+        "directory".to_string(),
+        toml::Value::Array(vec![
+            toml::Value::String("{scrapmf_root}".to_string()),
+            toml::Value::String("{category}".to_string()),
+            toml::Value::String("{username}".to_string()),
+            toml::Value::String("profile".to_string()),
+        ]),
+    );
+    avatar_table.insert(
+        "filename".to_string(),
+        toml::Value::String("{username}_{id}.{extension}".to_string()),
+    );
+    extractor.insert(
+        "facebook:avatar".to_string(),
+        toml::Value::Table(avatar_table),
+    );
+
+    // facebook:set — single set (e.g., Fotos del perfil, Fotos de portada) - ensure quick without facebook/
+    let mut set_table = toml::map::Map::new();
+    set_table.insert(
+        "directory".to_string(),
+        toml::Value::Array(vec![
+            toml::Value::String("{scrapmf_root}".to_string()),
+            toml::Value::String("{category}".to_string()),
+            toml::Value::String("{username}".to_string()),
+            toml::Value::String("albums".to_string()),
+            toml::Value::String("{title[:220]}{set_id:? (/)/}".to_string()),
+        ]),
+    );
+    set_table.insert(
+        "filename".to_string(),
+        toml::Value::String("{id}.{extension}".to_string()),
+    );
+    extractor.insert("facebook:set".to_string(), toml::Value::Table(set_table));
+
+    let site = Site {
+        site: Some("facebook".to_string()),
+        pattern: Some("facebook.com".to_string()),
+        patterns: vec![
+            "facebook.com".to_string(),
+            "fb.com".to_string(),
+            "m.facebook.com".to_string(),
+        ],
+        output_dir: None,
+        extra_args: vec!["--restrict-filenames".to_string(), "auto".to_string()],
+        cookies: None,
+        cookies_from_browser: Some("brave".to_string()),
+        cookie_profile: None,
+        rate_limit: Some(RateLimit {
+            sleep: Some("3-6".to_string()),
+            sleep_request: Some("8-15".to_string()),
+            sleep_429: Some(120),
+            limit_rate: None,
+        }),
+        archive: None,
+        extractor,
+        filename_template: None,
+        directory_template: None,
+    };
+    let body = toml::to_string_pretty(&site).context("serialize facebook site")?;
+    let header = r#"# scrapmf — site config — facebook
+# File: ~/.config/scrapmf/sites/facebook.toml (0o600, dir 0o700)
+# Gallery-dl 1.32.9: facebook:user dispatches photos/albums/avatar/info; set/video handle albums/videos.
+# Auth: siempre requiere sesión (c_user/xs) — brave cookies o --cookies file (no anon como vsco).
+# Árbol: PERFIL/facebook/CUENTA/{photos,albums/<title (set)/>,videos,profile}
+#   Publicaciones → photos/ {date}_{id}_{num}.{ext}
+#   Álbumes → albums/{title (set)}/{id}.{ext}
+#   Videos → videos/ {date}_{id}.{ext}
+#   Perfil → profile/ {username}_{id}.{ext}
+"#;
+    let content = format!("{header}{body}");
+    write_config_file(&target, &content)
+}
+
 /// Serialize a profile to `path` with doc header and 0o600 perms.
 pub fn write_profile_file(path: &Path, profile: &Profile) -> anyhow::Result<()> {
     let body = toml::to_string_pretty(profile).context("serialize profile")?;

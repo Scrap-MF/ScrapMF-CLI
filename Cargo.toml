@@ -38,6 +38,8 @@ sha2 = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 base64 = "0.23.1"
 pbkdf2 = "0.13.0"
+memchr = "2"
+hex = "0.4"
 
 [dev-dependencies]
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
@@ -52,6 +54,10 @@ bin-dir = "{ bin }{ binary-ext }"
 lto = true
 strip = true
 codegen-units = 1
+opt-level = "z"
+panic = "abort"
+debug = false
+overflow-checks = false
 
 [lints.rust]
 unsafe_code = "forbid"

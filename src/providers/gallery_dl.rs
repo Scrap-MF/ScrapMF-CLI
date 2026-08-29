@@ -84,7 +84,7 @@ impl Provider for GalleryDl {
     }
 
     fn build_args(&self, req: &ScrapeRequest) -> anyhow::Result<Vec<OsString>> {
-        let mut args = Vec::new();
+        let mut args = Vec::with_capacity(32 + req.extractor_options.len() * 2);
         // Cookies handling (anti-bot) — file and browser
         if let Some(ref file) = req.cookies_file {
             args.push(OsString::from("--cookies"));
@@ -163,8 +163,20 @@ impl Provider for GalleryDl {
         }
         // Inject profile root keyword: directory templates reference {scrapmf_root}
         // as first segment (profile/network/account/content structure).
-        // Interim fallback "default" until a dedicated no-profile flow exists.
-        let scrapmf_root = req.profile_name.as_deref().unwrap_or("default");
+        // Prefer the explicit profile name (profile flows + quick where root
+        // is the username). For direct CLI scrapes without a profile, derive
+        // the username from the URL so the tree shows <username> instead of
+        // the generic "default" placeholder.
+        let scrapmf_root = req
+            .profile_name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .or_else(|| {
+                crate::application::archive::site_account_from_url(&req.url)
+                    .map(|(_, account)| account)
+            })
+            .unwrap_or_else(|| "default".to_string());
         // Nombre nuevo + legacy: configs de usuarios pre-renombre usan
         // {scarpmf_root} en sus plantillas y deben seguir resolviendo.
         // REGRESSION NOTE: each -o needs its OWN flag. The legacy alias below
@@ -435,9 +447,23 @@ mod tests {
     fn build_args_injects_default_root_without_profile() {
         let g = GalleryDl;
         let args = g.build_args(&req("https://example.com")).expect("build");
+        // example.com has no known site_account, so fallback remains "default"
         assert!(
             args.iter()
                 .any(|a| a.to_string_lossy() == "extractor.keywords.scrapmf_root=default")
+        );
+    }
+
+    #[test]
+    fn build_args_derives_username_when_no_profile_but_known_site() {
+        let g = GalleryDl;
+        let mut r = req("https://www.instagram.com/someuser/");
+        r.profile_name = None;
+        let args = g.build_args(&r).expect("build");
+        assert!(
+            args.iter()
+                .any(|a| a.to_string_lossy() == "extractor.keywords.scrapmf_root=someuser"),
+            "known site without explicit profile should use URL username, not default"
         );
     }
 }

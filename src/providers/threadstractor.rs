@@ -47,7 +47,7 @@ impl Provider for Threadstractor {
 
     #[allow(clippy::collapsible_if)]
     fn build_args(&self, req: &ScrapeRequest) -> anyhow::Result<Vec<OsString>> {
-        let mut args = Vec::new();
+        let mut args = Vec::with_capacity(16);
 
         // Cookies (same as gallery-dl)
         if let Some(ref file) = req.cookies_file {
@@ -104,6 +104,34 @@ impl Provider for Threadstractor {
 
         // Filename / directory templates: threadstractor supports templating via
         // --filename-template and --directory-template (f-string style).
+        // Resolve {scrapmf_root}/{scarpmf_root} literals before passing to
+        // the Python binary. Profile requests must not fall back to "default":
+        // quick uses the username as root, profile uses the profile name.
+        // This mirrors gallery-dl's extractor.keywords.scrapmf_root injection
+        // but as a literal replacement so threadstractor never sees the placeholder.
+        let resolved_root = req
+            .profile_name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .or_else(|| {
+                // Fallback for direct CLI scrapes without a profile: derive
+                // username from the URL so quick still shows <username> and
+                // never "default".
+                crate::application::archive::site_account_from_url(&req.url)
+                    .map(|(_, account)| account)
+            });
+        let resolve_dirs = |dirs: &[String]| -> String {
+            dirs.iter()
+                .map(|s| match s.as_str() {
+                    "{scrapmf_root}" | "{scarpmf_root}" => resolved_root
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string()),
+                    other => other.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join("/")
+        };
         if req.profile_pic_only {
             args.push(OsString::from("--filename-template"));
             args.push(OsString::from("{username}_profile.{extension}"));
@@ -113,15 +141,17 @@ impl Provider for Threadstractor {
                 .is_some_and(|d| d.iter().any(|s| s.contains("profile")));
             if use_caller {
                 if let Some(ref dirs) = req.directory_template {
-                    let joined = dirs.join("/");
+                    let joined = resolve_dirs(dirs);
                     args.push(OsString::from("--directory-template"));
                     args.push(OsString::from(joined));
                 }
             } else {
+                // No caller dirs → build literal root + profile suffix
+                let root = resolved_root
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string());
                 args.push(OsString::from("--directory-template"));
-                args.push(OsString::from(
-                    "{scrapmf_root}/{category}/{username}/profile",
-                ));
+                args.push(OsString::from(format!("{root}/profile")));
             }
         } else {
             if let Some(ref tmpl) = req.filename_template {
@@ -129,7 +159,7 @@ impl Provider for Threadstractor {
                 args.push(OsString::from(tmpl));
             }
             if let Some(ref dirs) = req.directory_template {
-                let joined = dirs.join("/");
+                let joined = resolve_dirs(dirs);
                 args.push(OsString::from("--directory-template"));
                 args.push(OsString::from(joined));
             }
@@ -219,5 +249,58 @@ mod tests {
         let r = req("https://www.threads.com/@user");
         let args = Threadstractor.build_args(&r).unwrap();
         assert!(!args.iter().any(|a| a == "--filename-template"));
+    }
+
+    #[test]
+    fn build_args_resolves_scrapmf_root_to_profile_name() {
+        let mut r = req("https://www.threads.com/@someuser");
+        r.profile_name = Some("myprofile".to_string());
+        r.directory_template = Some(vec![
+            "{scrapmf_root}".to_string(),
+            "{category}".to_string(),
+            "{username}".to_string(),
+            "posts".to_string(),
+        ]);
+        let args = Threadstractor.build_args(&r).unwrap();
+        let joined = args
+            .windows(2)
+            .find(|w| w[0] == "--directory-template")
+            .map(|w| w[1].to_string_lossy().into_owned())
+            .unwrap_or_default();
+        assert!(
+            joined.starts_with("myprofile/"),
+            "profile root must be literal profile name, got {joined}"
+        );
+        assert!(!joined.contains("{scrapmf_root}"));
+        assert!(!joined.contains("default"));
+    }
+
+    #[test]
+    fn build_args_quick_resolves_root_to_username_literal() {
+        let mut r = req("https://www.threads.com/@someuser");
+        r.profile_name = Some("someuser".to_string());
+        r.directory_template = Some(vec!["{scrapmf_root}".to_string(), "photos".to_string()]);
+        let args = Threadstractor.build_args(&r).unwrap();
+        let joined = args
+            .windows(2)
+            .find(|w| w[0] == "--directory-template")
+            .map(|w| w[1].to_string_lossy().into_owned())
+            .unwrap_or_default();
+        assert_eq!(joined, "someuser/photos");
+    }
+
+    #[test]
+    fn build_args_no_profile_fallback_is_username_from_url_not_default() {
+        let mut r = req("https://www.threads.com/@deriveduser");
+        // no profile_name set → fallback to URL account
+        r.directory_template = Some(vec!["{scrapmf_root}".to_string(), "posts".to_string()]);
+        let args = Threadstractor.build_args(&r).unwrap();
+        let joined = args
+            .windows(2)
+            .find(|w| w[0] == "--directory-template")
+            .map(|w| w[1].to_string_lossy().into_owned())
+            .unwrap_or_default();
+        assert_eq!(joined, "deriveduser/posts");
+        assert!(!joined.contains("default"));
     }
 }

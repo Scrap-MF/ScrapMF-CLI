@@ -119,22 +119,7 @@ pub fn logs_dir() -> Option<PathBuf> {
 /// Filesystem-safe name component: keep alphanumerics, `-`, `_`, `.`;
 /// everything else (spaces, `/`, `:` …) collapses to `_`; capped at 32 chars.
 fn sanitize_component(s: &str) -> String {
-    let cleaned: String = s
-        .chars()
-        .take(32)
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if cleaned.is_empty() {
-        "job".to_string()
-    } else {
-        cleaned
-    }
+    crate::util::sanitize_component_with_dot(s, 32, "job")
 }
 
 /// `YYYYmmdd-HHMMSS` in UTC from the system clock (no external crates).

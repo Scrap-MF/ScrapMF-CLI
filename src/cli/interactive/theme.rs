@@ -51,6 +51,7 @@ pub fn render_config() -> RenderConfig<'static> {
 
 const INSTAGRAM_PINK: anstyle::RgbColor = anstyle::RgbColor(225, 48, 108);
 const TWITTER_BLUE: anstyle::RgbColor = anstyle::RgbColor(29, 161, 242);
+const FACEBOOK_BLUE: anstyle::RgbColor = anstyle::RgbColor(24, 119, 242);
 
 /// True-brand ANSI color per known site; None → render plain.
 fn brand_color(site_key: &str) -> Option<anstyle::RgbColor> {
@@ -62,6 +63,8 @@ fn brand_color(site_key: &str) -> Option<anstyle::RgbColor> {
         "twitter" => Some(TWITTER_BLUE),
         "x" => Some(TWITTER_BLUE),
         "vsco" => Some(anstyle::RgbColor(254, 232, 158)),
+        "facebook" => Some(FACEBOOK_BLUE),
+        "fb" => Some(FACEBOOK_BLUE),
         _ => None,
     }
 }

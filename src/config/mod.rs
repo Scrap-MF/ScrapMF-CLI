@@ -17,18 +17,12 @@ pub use migrations::{
     migrate_legacy_placeholders,
 };
 pub use templates::{
-    ensure_example_sites, ensure_threads_site, ensure_tiktok_site, ensure_twitter_site,
-    ensure_vsco_site, write_profile_file,
+    ensure_example_sites, ensure_facebook_site, ensure_threads_site, ensure_tiktok_site,
+    ensure_twitter_site, ensure_vsco_site, write_profile_file,
 };
 
 fn expand_tilde(path: &Path) -> PathBuf {
-    let s = path.to_string_lossy();
-    if let Some(stripped) = s.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(stripped);
-    }
-    path.to_path_buf()
+    crate::util::expand_tilde(path)
 }
 
 pub fn sites_dir() -> Option<PathBuf> {
@@ -66,8 +60,40 @@ pub fn resolve_site<'a>(
         .find(|(_, site)| site_matches(site, url))
 }
 
+use std::sync::{Arc, Mutex, OnceLock};
+
+fn config_cache() -> &'static Mutex<Option<Arc<Config>>> {
+    static CACHE: OnceLock<Mutex<Option<Arc<Config>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Clear the in-memory config cache (called after save/update and in tests).
+pub fn clear_cache() {
+    if let Ok(mut g) = config_cache().lock() {
+        *g = None;
+    }
+}
+
 /// Load config from XDG `~/.config/scrapmf/config.toml` and presets from `presets/**/*.toml`.
 pub fn load() -> anyhow::Result<Config> {
+    // Fast path: use cached config if available (skip FS scans). Bypass in
+    // tests so each test can use its own isolated temp XDG dir.
+    if !cfg!(test)
+        && let Ok(guard) = config_cache().lock()
+        && let Some(cached) = guard.clone()
+    {
+        return Ok((*cached).clone());
+    }
+    let cfg = load_inner()?;
+    if !cfg!(test)
+        && let Ok(mut guard) = config_cache().lock()
+    {
+        *guard = Some(Arc::new(cfg.clone()));
+    }
+    Ok(cfg)
+}
+
+fn load_inner() -> anyhow::Result<Config> {
     // One-time migration: inline [sites]/[presets]/[profiles] → separate files.
     // Idempotent and cheap (early return if no inline tables).
     let _ = migrations::migrate_inline_config_to_files();
@@ -116,79 +142,62 @@ pub fn load() -> anyhow::Result<Config> {
     Ok(cfg)
 }
 
-fn load_layered_presets(cfg: &mut Config, dir: &Path) {
+fn for_each_toml_file<F>(dir: &Path, f: &mut F)
+where
+    F: FnMut(String, String),
+{
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            // Recurse one level for sites/persons subdirs
-            load_layered_presets(cfg, &path);
+            for_each_toml_file(&path, f);
             continue;
         }
         if path.extension().is_some_and(|e| e == "toml")
             && let Some(stem) = path.file_stem().and_then(|n| n.to_str())
-            && let Ok(s) = std::fs::read_to_string(&path)
-            && let Ok(preset) = toml::from_str::<Preset>(&s)
+            && let Ok(content) = std::fs::read_to_string(&path)
         {
-            // Validate before insert
-            if crate::application::scraper::validate_extra_args(&preset.extra_args).is_ok() {
-                cfg.presets.insert(stem.to_string(), preset);
-            }
+            f(stem.to_string(), content);
         }
     }
+}
+
+fn load_layered_presets(cfg: &mut Config, dir: &Path) {
+    for_each_toml_file(dir, &mut |stem, content| {
+        if let Ok(preset) = toml::from_str::<Preset>(&content)
+            && crate::application::scraper::validate_extra_args(&preset.extra_args).is_ok()
+        {
+            cfg.presets.insert(stem, preset);
+        }
+    });
 }
 
 fn load_layered_sites(cfg: &mut Config, dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            load_layered_sites(cfg, &path);
-            continue;
-        }
-        if path.extension().is_some_and(|e| e == "toml")
-            && let Some(stem) = path.file_stem().and_then(|n| n.to_str())
-            && let Ok(s) = std::fs::read_to_string(&path)
-            && let Ok(site) = toml::from_str::<Site>(&s)
+    for_each_toml_file(dir, &mut |stem, content| {
+        if let Ok(site) = toml::from_str::<Site>(&content)
             && crate::application::scraper::validate_extra_args(&site.extra_args).is_ok()
         {
-            cfg.sites.insert(stem.to_string(), site);
+            cfg.sites.insert(stem, site);
         }
-    }
+    });
 }
 
 fn load_layered_profiles(cfg: &mut Config, dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            load_layered_profiles(cfg, &path);
-            continue;
-        }
-        if path.extension().is_some_and(|e| e == "toml")
-            && let Some(stem) = path.file_stem().and_then(|n| n.to_str())
-            && let Ok(s) = std::fs::read_to_string(&path)
-            && let Ok(mut profile) = toml::from_str::<Profile>(&s)
-        {
-            // Legacy migration: sites = ["instagram"] -> accounts
+    for_each_toml_file(dir, &mut |stem, content| {
+        if let Ok(mut profile) = toml::from_str::<Profile>(&content) {
             if profile.accounts.is_empty() && !profile.sites.is_empty() {
-                for site in profile.sites.clone() {
+                for site in std::mem::take(&mut profile.sites) {
                     profile.accounts.entry(site).or_default().push(Account {
                         username: None,
                         ..Default::default()
                     });
                 }
-                profile.sites.clear();
             }
-            cfg.profiles.insert(stem.to_string(), profile);
+            cfg.profiles.insert(stem, profile);
         }
-    }
+    });
 }
 
 /// Resolve preset by explicit name or auto-match URL pattern.
@@ -219,7 +228,9 @@ pub fn save(cfg: &Config) -> anyhow::Result<()> {
         fs::restrict_perms(parent, true);
     }
     let content = toml::to_string_pretty(cfg).context("serialize config")?;
-    write_config_file(&path, &content)
+    write_config_file(&path, &content)?;
+    clear_cache();
+    Ok(())
 }
 
 /// Load, mutate in place, and persist the main config.

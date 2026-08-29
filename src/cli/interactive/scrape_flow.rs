@@ -6,23 +6,41 @@ use inquire::{Confirm, Text};
 use crate::application::scraper::{ScrapeRequest, validate_url};
 use crate::config;
 
-use super::content::{build_tagged_urls, prompt_content_kinds, select_urls};
+use super::content::{ContentKind, build_tagged_urls, prompt_content_kinds, select_urls};
 use super::{ask_nonempty, select_menu};
 
 /// Ask whether this run should use a named cookie profile instead of the
 /// site defaults. Returns the profile path when overridden.
-pub(super) fn prompt_cookie_override() -> Option<PathBuf> {
+pub(super) fn prompt_cookie_override(site: &str) -> Option<PathBuf> {
     use crate::config::cookies;
     let profiles = cookies::list_profiles();
-    if profiles.is_empty() {
-        return None; // nothing to choose — keep site defaults
-    }
+    // Filter profiles to those that actually contain cookies for this site
+    let site_domains = cookies::domains_for_site(site);
+    let filtered: Vec<String> = profiles
+        .into_iter()
+        .filter(|name| {
+            if site_domains.is_empty() {
+                return true;
+            }
+            match cookies::load_profile(name) {
+                Ok(cookies) => cookies.iter().any(|c| {
+                    site_domains
+                        .iter()
+                        .any(|d| c.domain == *d || c.domain.ends_with(&format!(".{d}")))
+                }),
+                Err(_) => false,
+            }
+        })
+        .collect();
+    // Always offer at least Default, even if no matching profiles
     let mut opts = vec!["Default (from site config)".to_string()];
     opts.extend(
-        profiles
+        filtered
             .iter()
             .map(|p| format!("{p}  — {}", cookies::profile_summary(p).unwrap_or_default())),
     );
+    // If only Default and no filtered profiles, still prompt so user sees the choice
+    // (previous behavior returned None without prompting, which hid the cookie step)
     let Ok(choice) = select_menu("Cookies for this run?", opts).prompt() else {
         return None;
     };
@@ -607,7 +625,7 @@ pub(super) fn prompt_scrape_direct_urls() {
 
     // Per-run cookie override (named profile instead of site defaults)
     let cookie_override = if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-        prompt_cookie_override()
+        prompt_cookie_override("")
     } else {
         None
     };
@@ -651,7 +669,8 @@ pub(super) fn prompt_quick_scrape() {
     let cfg = config::load().unwrap_or_default();
 
     // Site selection from sites/*.toml (+ fallbacks)
-    let site_opts = site_options_with_fallbacks(&["instagram", "tiktok", "twitter", "vsco"]);
+    let site_opts =
+        site_options_with_fallbacks(&["instagram", "tiktok", "twitter", "vsco", "facebook"]);
 
     let items: Vec<crate::cli::interactive::theme::SiteItem> = site_opts
         .into_iter()
@@ -661,16 +680,162 @@ pub(super) fn prompt_quick_scrape() {
         return;
     };
     let site_name = selected.key();
-    let Some(username) = ask_nonempty("Username (without @):") else {
-        return;
+    let prompt_text = if site_name == "facebook" {
+        "ID o URL del perfil (ej. 123..., https://www.facebook.com/profile.php?id=...):"
+    } else if site_name == "instagram" {
+        "Username or ID (without @):"
+    } else {
+        "Username (without @):"
+    };
+    let raw_input = match ask_nonempty(prompt_text) {
+        Some(s) => s,
+        None => return,
+    };
+    // Facebook: accept ID or full profile URL (profile.php?id=, people/Name/ID, fb.com, etc.)
+    // Instagram: accept ID (7-19 digits) as before. Both resolve ID → username.
+    let (raw_is_id, raw_id, display_for_menu) = if site_name == "instagram"
+        && crate::application::instagram_resolver::is_id_like(&raw_input)
+    {
+        let id = crate::application::instagram_resolver::normalize_id(&raw_input);
+        (true, id.clone(), id)
+    } else if site_name == "facebook" {
+        if let Some(extracted) =
+            crate::application::facebook_resolver::extract_identifier(&raw_input)
+        {
+            let is_id = crate::application::facebook_resolver::is_id_like(&extracted);
+            if is_id {
+                let nid = crate::application::facebook_resolver::normalize_id(&extracted);
+                (true, nid.clone(), nid)
+            } else {
+                (false, String::new(), extracted)
+            }
+        } else {
+            (
+                false,
+                String::new(),
+                raw_input.trim().trim_start_matches('@').to_string(),
+            )
+        }
+    } else {
+        (
+            false,
+            String::new(),
+            raw_input.trim().trim_start_matches('@').to_string(),
+        )
+    };
+    // Keep original ID for facebook URL building (pages use profile.php?id=ID, not sanitized title)
+    let facebook_id_for_url: Option<String> = if site_name == "facebook" && raw_is_id {
+        Some(raw_id.clone())
+    } else {
+        None
     };
 
-    // Content menu — single account, direct prompt
+    // Content menu — same cycle as username (choose content before cookies/resolve)
     let kinds = prompt_content_kinds(
         &site_name,
-        &super::theme::brand_account_label(&format!("{site_name}:{username}")),
+        &super::theme::brand_account_label(&format!("{site_name}:{display_for_menu}")),
     );
-    let tagged = build_tagged_urls(&site_name, &username);
+    if kinds.is_empty() {
+        println!("ℹ No content selected");
+        return;
+    }
+
+    // Site config (raw, not yet baked with username)
+    let site_cfg = cfg.sites.get(site_name.as_str()).cloned();
+    let extractor_options_raw = site_cfg
+        .as_ref()
+        .map(|s| s.extractor.clone())
+        .unwrap_or_default();
+    let directory_template_raw = site_cfg.as_ref().and_then(|s| s.directory_template.clone());
+    let cookies_from_browser_cfg = site_cfg
+        .as_ref()
+        .and_then(|s| s.cookies_from_browser.clone());
+    let cookies_file_cfg = site_cfg.as_ref().and_then(|s| s.cookies.clone());
+    let rate_limit = site_cfg.as_ref().and_then(|s| s.rate_limit.clone());
+    let archive = site_cfg.as_ref().and_then(|s| s.archive.clone());
+    let extra_args = site_cfg
+        .as_ref()
+        .map(|s| s.extra_args.clone())
+        .unwrap_or_default();
+    let filename_template = site_cfg.as_ref().and_then(|s| s.filename_template.clone());
+
+    // Per-run cookie override comes BEFORE ID resolution so resolver uses
+    // the same session that will be used for downloading (same cycle as username).
+    let cookie_override = if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        prompt_cookie_override(&site_name)
+    } else {
+        None
+    };
+    // Ensure terminal line is clean after Select (inquire leaves raw escape on some terms)
+    println!();
+    let (cookies_file_for_resolve, cookies_browser_for_resolve) =
+        if let Some(ref ov) = cookie_override {
+            (Some(ov.as_path()), None)
+        } else {
+            (
+                cookies_file_cfg.as_deref(),
+                cookies_from_browser_cfg.as_deref(),
+            )
+        };
+
+    // Now resolve ID → username if needed, using the final cookies
+    let username = if raw_is_id {
+        let res = if site_name == "instagram" {
+            crate::application::instagram_resolver::resolve_instagram_username(
+                &raw_id,
+                cookies_file_for_resolve,
+                cookies_browser_for_resolve,
+            )
+        } else if site_name == "facebook" {
+            crate::application::facebook_resolver::resolve_facebook_id_to_username(
+                &raw_id,
+                cookies_file_for_resolve,
+                cookies_browser_for_resolve,
+            )
+        } else {
+            Err(anyhow::anyhow!("unsupported site for ID"))
+        };
+        match res {
+            Ok(u) => {
+                println!("→ {} → @{} (resuelto)", raw_id, u);
+                u
+            }
+            Err(e) => {
+                let site_label = if site_name == "facebook" { "FB" } else { "IG" };
+                crate::output::print_error(&format!(
+                    "no se pudo resolver ID a username: {e} — verifica el ID y que la sesión de {site_label} esté vigente"
+                ));
+                crate::output::print_help("nota: el error queda visible hasta que presiones Enter");
+                let _ = Text::new("Presiona Enter para volver")
+                    .with_render_config(super::theme::render_config())
+                    .prompt();
+                return;
+            }
+        }
+    } else {
+        display_for_menu.clone()
+    };
+
+    let tagged = if site_name == "facebook"
+        && let Some(id) = &facebook_id_for_url
+    {
+        vec![
+            (
+                ContentKind::Posts,
+                format!("https://www.facebook.com/profile.php?id={id}/photos"),
+            ),
+            (
+                ContentKind::Albums,
+                format!("https://www.facebook.com/profile.php?id={id}/photos_albums"),
+            ),
+            (
+                ContentKind::Videos,
+                format!("https://www.facebook.com/profile.php?id={id}/videos/"),
+            ),
+        ]
+    } else {
+        build_tagged_urls(&site_name, &username)
+    };
     let Some((url, extra_urls)) = select_urls(&tagged, &kinds) else {
         println!("ℹ No content selected");
         return;
@@ -682,20 +847,11 @@ pub(super) fn prompt_quick_scrape() {
 
     let kinds_desc = super::content::kinds_description(&site_name, &kinds);
 
-    let site_cfg = cfg.sites.get(site_name.as_str()).cloned();
-    let mut extractor_options = site_cfg
-        .as_ref()
-        .map(|s| s.extractor.clone())
-        .unwrap_or_default();
-
-    // QUICK MODE — root tree at username: strip identity segments from every
-    // directory template (global + per-extractor, plain AND conditional
-    // tables like TikTok posts) and bake the username where {scrapmf_root}
-    // was, so paths never depend on gallery-dl keyword resolution.
-    let directory_template = site_cfg
-        .as_ref()
-        .and_then(|s| s.directory_template.clone())
+    // QUICK MODE — bake the resolved username into directory templates
+    let directory_template = directory_template_raw
+        .clone()
         .map(|dirs| flatten_quick_dirs(dirs, &username));
+    let mut extractor_options = extractor_options_raw.clone();
     for v in extractor_options.values_mut() {
         if let toml::Value::Table(map) = v
             && let Some(dir) = map.get_mut("directory")
@@ -703,17 +859,12 @@ pub(super) fn prompt_quick_scrape() {
             flatten_for_quick(dir, &username);
         }
     }
-    let cookies_from_browser = site_cfg
-        .as_ref()
-        .and_then(|s| s.cookies_from_browser.clone());
-    let cookies_file = site_cfg.as_ref().and_then(|s| s.cookies.clone());
-    let rate_limit = site_cfg.as_ref().and_then(|s| s.rate_limit.clone());
-    let archive = site_cfg.as_ref().and_then(|s| s.archive.clone());
-    let extra_args = site_cfg
-        .as_ref()
-        .map(|s| s.extra_args.clone())
-        .unwrap_or_default();
-    let filename_template = site_cfg.as_ref().and_then(|s| s.filename_template.clone());
+    // Final cookies for the jobs: override wins over site config
+    let (cookies_file, cookies_from_browser) = if let Some(ref ov) = cookie_override {
+        (Some(ov.clone()), None)
+    } else {
+        (cookies_file_cfg.clone(), cookies_from_browser_cfg.clone())
+    };
 
     let base_req = |directory_override: Option<Vec<String>>,
                     extra_opts: Vec<(String, String)>,
@@ -776,122 +927,86 @@ pub(super) fn prompt_quick_scrape() {
                 pass.to_string(),
             ));
         }
-        // Per-run cookie override (named profile instead of site defaults)
-        if std::io::IsTerminal::is_terminal(&std::io::stdout())
-            && let Some(file) = prompt_cookie_override()
-        {
-            for (req, ..) in jobs.iter_mut() {
-                req.cookies_file = Some(file.clone());
-                req.cookies_from_browser = None;
-            }
-        }
         preview_and_execute(jobs, &cfg);
         return;
     }
 
     // Threads: fotos/videos (posts) and profile pic are separate — profile needs --profile-pic-only
+    // Always 3 separate jobs so the dashboard shows progress 1-by-1, even for All.
     if site_name == "threads" {
         use crate::cli::interactive::content::ContentKind;
         let has_photos = kinds.contains(&ContentKind::Photos);
         let has_videos = kinds.contains(&ContentKind::Videos);
         let has_profile = kinds.contains(&ContentKind::Profile);
-        let is_all = has_photos && has_videos && has_profile;
         if has_photos || has_videos || has_profile {
             let mut jobs = Vec::new();
-            if is_all {
-                // All: single job, threadstractor will download the carousel once and split into photos/videos/profile siblings
-                // Use user root as base (e.g. ~/scrapmf/example_user), Python will create the three subfolders
-                let all_dirs = flatten_quick_dirs(vec!["{scrapmf_root}".to_string()], &username);
-                let req_all = base_req(
-                    Some(all_dirs),
+            if has_photos {
+                let photos_dirs = flatten_quick_dirs(
+                    vec![
+                        "{scrapmf_root}".to_string(),
+                        "{category}".to_string(),
+                        "{username}".to_string(),
+                        "photos".to_string(),
+                    ],
+                    &username,
+                );
+                let mut req_photos = base_req(
+                    Some(photos_dirs),
                     Vec::new(),
                     extra_urls.clone(),
                     username.clone(),
                 );
+                req_photos.extra_args.push("--photos-only".to_string());
                 jobs.push((
-                    req_all,
+                    req_photos,
                     site_name.clone(),
-                    format!("{username} (all)"),
-                    "all".to_string(),
+                    format!("{username} (photos)"),
+                    "photos".to_string(),
                 ));
-            } else {
-                if has_photos {
-                    let photos_dirs = flatten_quick_dirs(
-                        vec![
-                            "{scrapmf_root}".to_string(),
-                            "{category}".to_string(),
-                            "{username}".to_string(),
-                            "photos".to_string(),
-                        ],
-                        &username,
-                    );
-                    let mut req_photos = base_req(
-                        Some(photos_dirs),
-                        Vec::new(),
-                        extra_urls.clone(),
-                        username.clone(),
-                    );
-                    req_photos.extra_args.push("--photos-only".to_string());
-                    jobs.push((
-                        req_photos,
-                        site_name.clone(),
-                        format!("{username} (photos)"),
-                        "photos".to_string(),
-                    ));
-                }
-                if has_videos {
-                    let videos_dirs = flatten_quick_dirs(
-                        vec![
-                            "{scrapmf_root}".to_string(),
-                            "{category}".to_string(),
-                            "{username}".to_string(),
-                            "videos".to_string(),
-                        ],
-                        &username,
-                    );
-                    let mut req_videos = base_req(
-                        Some(videos_dirs),
-                        Vec::new(),
-                        extra_urls.clone(),
-                        username.clone(),
-                    );
-                    req_videos.extra_args.push("--videos-only".to_string());
-                    jobs.push((
-                        req_videos,
-                        site_name.clone(),
-                        format!("{username} (videos)"),
-                        "videos".to_string(),
-                    ));
-                }
-                if has_profile {
-                    let profile_dirs = flatten_quick_dirs(
-                        vec![
-                            "{scrapmf_root}".to_string(),
-                            "{category}".to_string(),
-                            "{username}".to_string(),
-                            "profile".to_string(),
-                        ],
-                        &username,
-                    );
-                    let mut req_profile =
-                        base_req(Some(profile_dirs), Vec::new(), Vec::new(), username.clone());
-                    req_profile.profile_pic_only = true;
-                    jobs.push((
-                        req_profile,
-                        site_name.clone(),
-                        format!("{username} (profile)"),
-                        "profile".to_string(),
-                    ));
-                }
             }
-            // Per-run cookie override
-            if std::io::IsTerminal::is_terminal(&std::io::stdout())
-                && let Some(file) = prompt_cookie_override()
-            {
-                for (req, ..) in jobs.iter_mut() {
-                    req.cookies_file = Some(file.clone());
-                    req.cookies_from_browser = None;
-                }
+            if has_videos {
+                let videos_dirs = flatten_quick_dirs(
+                    vec![
+                        "{scrapmf_root}".to_string(),
+                        "{category}".to_string(),
+                        "{username}".to_string(),
+                        "videos".to_string(),
+                    ],
+                    &username,
+                );
+                let mut req_videos = base_req(
+                    Some(videos_dirs),
+                    Vec::new(),
+                    extra_urls.clone(),
+                    username.clone(),
+                );
+                req_videos.extra_args.push("--videos-only".to_string());
+                jobs.push((
+                    req_videos,
+                    site_name.clone(),
+                    format!("{username} (videos)"),
+                    "videos".to_string(),
+                ));
+            }
+            if has_profile {
+                let profile_dirs = flatten_quick_dirs(
+                    vec![
+                        "{scrapmf_root}".to_string(),
+                        "{category}".to_string(),
+                        "{username}".to_string(),
+                        "profile".to_string(),
+                    ],
+                    &username,
+                );
+                let mut req_profile =
+                    base_req(Some(profile_dirs), Vec::new(), Vec::new(), username.clone());
+                req_profile.profile_pic_only = true;
+                jobs.push((
+                    req_profile,
+                    site_name.clone(),
+                    format!("{username} (profile)"),
+                    "profile".to_string(),
+                ));
             }
             preview_and_execute(jobs, &cfg);
             return;
@@ -899,17 +1014,7 @@ pub(super) fn prompt_quick_scrape() {
     }
 
     let req = base_req(directory_template, Vec::new(), extra_urls, username.clone());
-
-    // Per-run cookie override (named profile instead of site defaults)
-    let mut jobs = vec![(req, site_name.clone(), username.clone(), kinds_desc)];
-    if std::io::IsTerminal::is_terminal(&std::io::stdout())
-        && let Some(file) = prompt_cookie_override()
-    {
-        for (req, ..) in jobs.iter_mut() {
-            req.cookies_file = Some(file.clone());
-            req.cookies_from_browser = None;
-        }
-    }
+    let jobs = vec![(req, site_name.clone(), username.clone(), kinds_desc)];
     preview_and_execute(jobs, &cfg);
 }
 
