@@ -1,4 +1,4 @@
-use inquire::MultiSelect;
+use crate::cli::interactive::menu;
 
 /// Content types selectable per account in Scrape as Profile.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -46,24 +46,12 @@ impl ContentKind {
 }
 
 /// Site-aware content menu options. First entry is always the shortcut label "All".
+/// Delegates to the central `crate::sites` registry — adding a site = one registry entry.
 pub(super) fn content_options(site: &str) -> Vec<&'static str> {
-    match site {
-        "instagram" => vec!["All", "Posts", "Reels", "Highlights", "Stories", "Profile"],
-        // Stories hidden from the menu: gallery-dl v1.32.9 cannot list
-        // stories for private-but-followed accounts (profile statusCode
-        // 10222) and its story content APIs serve empty lists to
-        // non-browser sessions. Restore once a patched gallery-dl build is
-        // integrated — build_tagged_urls still carries the URL.
-        "tiktok" => vec!["All", "Videos", "Photos", "Profile"],
-        // twitter media timeline covers both videos and photos (split into
-        // folders by {type} conditional directory inside gallery-dl)
-        "twitter" => vec!["All", "Media", "Profile"],
-        // vsco: photos AND videos share the gallery folder (single pass)
-        "vsco" => vec!["All", "Media", "Profile"],
-        "threads" => vec!["All", "Photos", "Videos", "Profile"],
-        "facebook" => vec!["All", "Posts", "Albums", "Videos"],
-        _ => vec!["All", "Posts"],
+    if let Some(spec) = crate::sites::registry::find_by_id(site) {
+        return spec.content_kinds.to_vec();
     }
+    vec!["All", "Posts"]
 }
 
 /// Resolve MultiSelect labels to ContentKinds for a site.
@@ -99,11 +87,9 @@ pub(super) fn is_identity_segment(s: &str) -> bool {
 
 /// Whether a site offers a content-type menu (multiple content kinds).
 /// Generic sites only have Posts — no menu, auto [Posts].
+/// Registry-driven: any known site has a menu.
 pub(super) fn site_has_content_menu(site: &str) -> bool {
-    matches!(
-        site,
-        "instagram" | "tiktok" | "twitter" | "vsco" | "threads" | "facebook"
-    )
+    crate::sites::registry::find_by_id(site).is_some()
 }
 
 /// The "apply same selection to all" shortcut only applies when:
@@ -119,111 +105,21 @@ pub(super) fn shortcut_applicable(selected: &[(String, String, crate::config::Ac
 }
 
 pub(super) fn build_tagged_urls(site: &str, username: &str) -> Vec<(ContentKind, String)> {
-    match site {
-        "facebook" => vec![
-            (
-                ContentKind::Posts,
-                format!("https://www.facebook.com/{username}/photos"),
-            ),
-            (
-                ContentKind::Albums,
-                format!("https://www.facebook.com/{username}/photos_albums"),
-            ),
-            (
-                ContentKind::Videos,
-                format!("https://www.facebook.com/{username}/videos/"),
-            ),
-        ],
-        "threads" => vec![
-            (
-                ContentKind::Photos,
-                format!("https://www.threads.com/@{username}"),
-            ),
-            (
-                ContentKind::Videos,
-                format!("https://www.threads.com/@{username}"),
-            ),
-            (
-                ContentKind::Profile,
-                format!("https://www.threads.com/@{username}"),
-            ),
-        ],
-        "instagram" => vec![
-            (
-                ContentKind::Posts,
-                format!("https://www.instagram.com/{username}/"),
-            ),
-            (
-                ContentKind::Reels,
-                format!("https://www.instagram.com/{username}/reels/"),
-            ),
-            (
-                ContentKind::Highlights,
-                format!("https://www.instagram.com/{username}/highlights/"),
-            ),
-            (
-                ContentKind::Stories,
-                format!("https://www.instagram.com/stories/{username}/"),
-            ),
-            (
-                ContentKind::Profile,
-                format!("https://www.instagram.com/{username}/avatar"),
-            ),
-        ],
-        // Videos and Photos share the same posts URL — the folder split and
-        // per-type filtering happen inside gallery-dl (extension conditions
-        // + photos/videos extractor options).
-        "tiktok" => vec![
-            (
-                ContentKind::Videos,
-                format!("https://www.tiktok.com/@{username}/posts"),
-            ),
-            (
-                ContentKind::Photos,
-                format!("https://www.tiktok.com/@{username}/posts"),
-            ),
-            (
-                ContentKind::Stories,
-                format!("https://www.tiktok.com/@{username}/stories"),
-            ),
-            (
-                ContentKind::Profile,
-                format!("https://www.tiktok.com/@{username}/avatar"),
-            ),
-        ],
-        // Media timeline covers photos+videos (folder split by {type} inside
-        // gallery-dl). Profile = avatar AND header banner (two distinct URLs).
-        "twitter" => vec![
-            (
-                ContentKind::Media,
-                format!("https://x.com/{username}/media"),
-            ),
-            (
-                ContentKind::Profile,
-                format!("https://x.com/{username}/photo"),
-            ),
-            (
-                ContentKind::Profile,
-                format!("https://x.com/{username}/header_photo"),
-            ),
-        ],
-        // VSCO gallery covers photos+videos together (single pass, no auth).
-        // Profile = avatar.
-        "vsco" => vec![
-            (
-                ContentKind::Media,
-                format!("https://vsco.co/{username}/gallery"),
-            ),
-            (
-                ContentKind::Profile,
-                format!("https://vsco.co/{username}/avatar"),
-            ),
-        ],
-        _ => vec![(
-            ContentKind::Posts,
-            format!("https://www.{site}.com/{username}/"),
-        )],
+    if let Some(spec) = crate::sites::registry::find_by_id(site) {
+        let mut out = Vec::with_capacity(spec.url_templates.len());
+        for (label, tmpl) in spec.url_templates {
+            let kind = ContentKind::from_label(label).unwrap_or(ContentKind::Posts);
+            let url = tmpl.replace("{username}", username);
+            out.push((kind, url));
+        }
+        if !out.is_empty() {
+            return out;
+        }
     }
+    vec![(
+        ContentKind::Posts,
+        format!("https://www.{site}.com/{username}/"),
+    )]
 }
 
 /// Filter tagged URLs by selected kinds. Returns (primary url, extra urls).
@@ -299,48 +195,40 @@ pub(super) fn kinds_description(site: &str, kinds: &[ContentKind]) -> String {
 }
 
 pub(super) fn prompt_content_kinds(site: &str, label: &str) -> Vec<ContentKind> {
-    crate::cli::interactive::clear_screen();
-    let result =
-        MultiSelect::new(
-            format!("Content for {label}").as_str(),
-            content_options(site)
-                .into_iter()
-                .map(String::from)
-                .collect(),
-        )
-        // Short fixed menu: typing to filter adds nothing and lets stray
-        // keystrokes land in an invisible input.
-        .with_help_message("[space to select · enter to confirm]")
-        .without_filtering()
-        .with_render_config(crate::cli::interactive::theme::render_config())
-        .with_validator(
-            |picked: &[inquire::list_option::ListOption<&String>]| -> Result<
-                inquire::validator::Validation,
-                Box<dyn std::error::Error + Send + Sync>,
-            > {
-                let labels: Vec<String> = picked.iter().map(|o| o.value.clone()).collect();
-                Ok(match validate_kind_selection(&labels) {
-                    Err(msg) => inquire::validator::Validation::Invalid(
-                        inquire::validator::ErrorMessage::Custom(msg),
-                    ),
-                    Ok(()) => inquire::validator::Validation::Valid,
-                })
-            },
-        )
-        .prompt();
-    match result {
-        Ok(picked) => {
-            tracing::debug!(site = %site, picked = ?picked, "content kinds selected");
-            resolve_kinds(site, &picked)
-        }
-        Err(e) => {
-            // InquireError::OperationCanceled (Esc) or Custom validator error surfaced as Err
-            eprintln!("content selection failed: {e}");
-            tracing::warn!(site = %site, error = %e, "content kinds prompt failed/canceled");
-            std::thread::sleep(std::time::Duration::from_millis(800));
-            Vec::new()
-        }
+    let opts: Vec<(String, Vec<String>)> = content_options(site)
+        .into_iter()
+        .map(|k| {
+            let details = match k {
+                "All" => vec!["select all kinds".to_string()],
+                "Posts" => vec!["feed posts".to_string()],
+                "Reels" => vec!["short videos".to_string()],
+                "Highlights" => vec!["saved highlights".to_string()],
+                "Stories" => vec!["24h stories".to_string()],
+                "Profile" => vec!["avatar".to_string()],
+                "Videos" => vec!["videos".to_string()],
+                "Photos" => vec!["photos".to_string()],
+                "Media" => vec!["photos + videos".to_string()],
+                "Albums" => vec!["albums".to_string()],
+                _ => Vec::new(),
+            };
+            (k.to_string(), details)
+        })
+        .collect();
+    let context = format!("Content for {label}");
+    let Some(idxs) = menu::pick_multi(&context, opts.clone(), &[]) else {
+        return Vec::new();
+    };
+    let picked: Vec<String> = idxs
+        .into_iter()
+        .filter_map(|i| opts.get(i).map(|(l, _)| l.clone()))
+        .collect();
+    if let Err(msg) = validate_kind_selection(&picked) {
+        eprintln!("{msg}");
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        return Vec::new();
     }
+    tracing::debug!(site = %site, picked = ?picked, "content kinds selected");
+    resolve_kinds(site, &picked)
 }
 
 /// Preview + Confirm + sequential execution of built jobs.

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use inquire::{Confirm, MultiSelect, Text};
+use inquire::{Confirm, Text};
 
 use crate::application::scraper::{ScrapeRequest, validate_url};
 use crate::config;
@@ -30,10 +30,16 @@ pub(super) fn prompt_scrape_as_profile() {
         println!("ℹ No profiles yet — create one via Configuration → Manage Profiles");
         return;
     }
-    let profile_choice = match select_menu("Choose profile:", profile_names.clone()).prompt() {
-        Ok(c) => c,
-        Err(_) => return,
+    let Some(idx) = crate::cli::interactive::menu::pick_single(
+        "Choose profile",
+        profile_names
+            .iter()
+            .map(|n| (n.clone(), vec![format!("profile: {n}")]))
+            .collect(),
+    ) else {
+        return;
     };
+    let profile_choice = profile_names[idx].clone();
     let Some(profile) = cfg.profiles.get(&profile_choice).cloned() else {
         return;
     };
@@ -81,19 +87,25 @@ pub(super) fn prompt_scrape_as_profile() {
         return;
     }
 
-    // MultiSelect accounts ({site}:{username}) — no filter input: account
-    // lists are short and stray keystrokes would land in an invisible input.
-    clear_screen();
-    let picked_labels = match MultiSelect::new("Select account(s)", account_options.clone())
-        .with_help_message("[space to select · → all · ← none · enter to confirm]")
-        .without_filtering()
-        .with_render_config(render_config())
-        .prompt()
-    {
-        Ok(v) if !v.is_empty() => v,
-        Ok(_) => return,
-        Err(_) => return,
+    // MultiSelect accounts — now via decorated Browser (box) so recuadro always present.
+    let opts: Vec<(String, Vec<String>)> = account_options
+        .iter()
+        .map(|o| (o.clone(), vec![]))
+        .collect();
+    let Some(idxs) = crate::cli::interactive::menu::pick_multi("Select account(s)", opts, &[])
+    else {
+        return;
     };
+    if idxs.is_empty() {
+        return;
+    }
+    let picked_labels: Vec<String> = idxs
+        .into_iter()
+        .filter_map(|i| account_options.get(i).cloned())
+        .collect();
+    if picked_labels.is_empty() {
+        return;
+    }
     let selected: Vec<(String, String, crate::config::Account)> = picked_labels
         .into_iter()
         .filter_map(|label| {
@@ -142,34 +154,29 @@ pub(super) fn prompt_scrape_as_profile() {
             .prompt()
             .unwrap_or(true);
         if same_for_all {
-            clear_screen();
-            let picked = match MultiSelect::new(
+            let opts: Vec<(String, Vec<String>)> = options
+                .iter()
+                .map(|s| (s.to_string(), Vec::new()))
+                .collect();
+            let Some(idxs) = crate::cli::interactive::menu::pick_multi(
                 "Content type(s) for all accounts",
-                options.iter().map(|s| s.to_string()).collect(),
-            )
-            .with_help_message("[space to select · → all · ← none · enter to confirm]")
-            .without_filtering()
-            .with_render_config(render_config())
-            .with_validator(
-                |picked: &[inquire::list_option::ListOption<&String>]| -> Result<
-                    inquire::validator::Validation,
-                    Box<dyn std::error::Error + Send + Sync>,
-                > {
-                    let labels: Vec<String> = picked.iter().map(|o| o.value.clone()).collect();
-                    Ok(match validate_kind_selection(&labels) {
-                        Err(msg) => inquire::validator::Validation::Invalid(
-                            inquire::validator::ErrorMessage::Custom(msg),
-                        ),
-                        Ok(()) => inquire::validator::Validation::Valid,
-                    })
-                },
-            )
-            .prompt()
-            {
-                Ok(v) if !v.is_empty() => v,
-                Ok(_) => return,
-                Err(_) => return,
+                opts.clone(),
+                &[],
+            ) else {
+                return;
             };
+            if idxs.is_empty() {
+                return;
+            }
+            let picked: Vec<String> = idxs
+                .into_iter()
+                .filter_map(|i| opts.get(i).map(|(l, _)| l.clone()))
+                .collect();
+            if let Err(msg) = validate_kind_selection(&picked) {
+                eprintln!("{msg}");
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                return;
+            }
             let kinds: Vec<ContentKind> = resolve_kinds(site, &picked);
             for _ in 0..selected.len() {
                 per_account_kinds.push(kinds.clone());

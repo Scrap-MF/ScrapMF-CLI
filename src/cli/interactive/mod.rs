@@ -1,45 +1,59 @@
-use inquire::{Select, Text};
+use inquire::Text;
 use std::io::Write;
 
 pub(super) fn clear_screen() {
     print!("\x1B[2J\x1B[H");
     let _ = std::io::stdout().flush();
-    if theme::colors_enabled() {
-        let name = anstyle::Style::new()
-            .fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Cyan)))
-            .bold();
-        let ver =
-            anstyle::Style::new().fg_color(Some(anstyle::Color::Ansi(anstyle::AnsiColor::Magenta)));
-        println!(
-            "{}  ▄▅▆▇ {} v{}{}{} — by MFApplications",
-            anstyle::Reset.render(),
-            name.render(),
-            ver.render(),
-            env!("CARGO_PKG_VERSION"),
-            anstyle::Reset.render()
-        );
-    } else {
-        println!(
-            "  ▄▅▆▇ scrapmf v{} — by MFApplications",
-            env!("CARGO_PKG_VERSION")
-        );
-    }
-    println!("  ───────────────────────────────────────");
+    // Header eliminated — all menus now live inside the Browser box
+    // `╭ SCRAPMF vX.Y.Z ─ {context} ─╮`. No ▄▅▆▇ printed here.
 }
 
-/// Standard option menu: clears the screen first (no stacked prompt residue)
-/// and disables filter typing (option lists are short; stray keystrokes have
-/// nothing to search). Chain `.with_help_message()` / `.with_default()` on
-/// the returned builder before calling `.prompt()`.
-pub(super) fn select_menu<'a, T: std::fmt::Display>(
-    prompt: &'a str,
+/// Decorated select that always renders inside the Browser box
+/// `╭ SCRAPMF vX.Y.Z ─ {prompt} ─╮`. Implements the same `.prompt()` API
+/// as `inquire::Select` so all call sites automatically inherit the chrome
+/// without needing `clear_screen` or `theme::render_config`.
+pub struct DecoratedSelect<T> {
+    prompt: String,
     options: Vec<T>,
-) -> Select<'a, T> {
-    clear_screen();
-    Select::new(prompt, options)
-        .without_filtering()
-        .with_help_message("[↑↓ to move · enter to confirm]")
-        .with_render_config(theme::render_config())
+}
+
+impl<T: std::fmt::Display + Clone> DecoratedSelect<T> {
+    pub fn without_filtering(self) -> Self {
+        self
+    }
+    pub fn with_help_message(self, _msg: &str) -> Self {
+        self
+    }
+    pub fn with_render_config(self, _cfg: inquire::ui::RenderConfig<'static>) -> Self {
+        self
+    }
+    pub fn with_default(self, _def: &T) -> Self {
+        self
+    }
+    pub fn prompt(self) -> Result<T, inquire::InquireError> {
+        let opts: Vec<(String, Vec<String>)> = self
+            .options
+            .iter()
+            .map(|o| (o.to_string(), Vec::new()))
+            .collect();
+        let title = self.prompt.clone();
+        match crate::cli::interactive::menu::pick_single(&title, opts) {
+            Some(idx) => Ok(self.options[idx].clone()),
+            None => Err(inquire::InquireError::OperationCanceled),
+        }
+    }
+}
+
+/// Standard option menu — now always decorated via Browser chrome.
+/// Chain `.with_help_message()` / `.with_default()` remains no-op for compat.
+pub(super) fn select_menu<T: std::fmt::Display + Clone>(
+    prompt: &str,
+    options: Vec<T>,
+) -> DecoratedSelect<T> {
+    DecoratedSelect {
+        prompt: prompt.to_string(),
+        options,
+    }
 }
 
 /// Run interactive prompt. All scrape flows (saved profile, URL(s), quick
@@ -128,6 +142,7 @@ pub(crate) mod browser;
 mod content;
 pub(crate) mod doctor_view;
 pub(crate) mod home;
+pub mod menu;
 pub(crate) mod plugins_menu;
 mod profiles;
 mod scrape_flow;

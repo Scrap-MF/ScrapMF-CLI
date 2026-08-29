@@ -35,13 +35,9 @@ fn ensure_app_config() {
     let steps: &[InitStep] = &[
         ("create config dirs", scrapmf::config::ensure_config_dirs),
         ("default config", scrapmf::config::ensure_default_config),
-        ("example sites", scrapmf::config::ensure_example_sites),
-        ("tiktok site", scrapmf::config::ensure_tiktok_site),
-        ("twitter site", scrapmf::config::ensure_twitter_site),
-        ("vsco site", scrapmf::config::ensure_vsco_site),
-        ("facebook site", scrapmf::config::ensure_facebook_site),
-        // NOTE: the threads site template is NOT created at startup — it is
-        // plugin-backed and `plugins::install()` creates it on Enable.
+        // Single canonical site generation — registry is the only source of truth.
+        // Adding a new network = one `SiteSpec` entry; threads remains plugin-backed.
+        ("ensure sites", scrapmf::sites::ensure_all_sites),
         ("site highlights migration", || {
             scrapmf::config::migrate_all_sites_highlights().map(|_: usize| ())
         }),

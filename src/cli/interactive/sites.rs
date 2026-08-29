@@ -2,7 +2,7 @@ use super::profiles::{edit_profile_menu, prompt_new_profile_accounts};
 use super::{ask_nonempty, clear_screen, edit_with_editor, select_menu, theme::render_config};
 use std::path::Path;
 
-use inquire::{Confirm, MultiSelect, Text};
+use inquire::{Confirm, Text};
 
 pub(super) fn configuration_submenu() {
     use crate::cli::interactive::browser::{Browser, Outcome};
@@ -106,7 +106,6 @@ pub(super) fn configuration_submenu() {
 
 fn general_settings_menu() {
     loop {
-        clear_screen();
         let cfg = crate::config::load().unwrap_or_default();
         let cfg_path = crate::config::config_path()
             .map(|p| p.display().to_string())
@@ -123,10 +122,25 @@ fn general_settings_menu() {
             "Edit raw config.toml ($EDITOR)".to_string(),
             "Back".to_string(),
         ];
-        let choice = match select_menu("General settings", options).prompt() {
-            Ok(c) => c,
-            Err(_) => return,
+        let opts: Vec<(String, Vec<String>)> = options
+            .iter()
+            .map(|o| {
+                let details = if o.starts_with("Output directory:") {
+                    vec![format!("current: {}", cfg.general.output_dir.display())]
+                } else if o.starts_with("Download archive:") {
+                    vec![format!("archive is {archive_label}")]
+                } else {
+                    Vec::new()
+                };
+                (o.clone(), details)
+            })
+            .collect();
+        let Some(idx) =
+            crate::cli::interactive::menu::pick_single("Configuration ─ General settings", opts)
+        else {
+            return;
         };
+        let choice = options[idx].clone();
         if choice.starts_with("Output directory:") {
             let current = cfg.general.output_dir.display().to_string();
             let Ok(new_val) = Text::new("Output directory:")
@@ -213,27 +227,44 @@ fn create_profile_wizard() {
         "Vivaldi".into(),
         "Opera".into(),
     ];
-    let Ok(browser) = select_menu("Capture from which browser?", browsers).prompt() else {
+    let Some(b_idx) = crate::cli::interactive::menu::pick_single(
+        "Configuration ─ Cookie capture ─ Browser",
+        browsers
+            .iter()
+            .map(|b| (b.clone(), vec![format!("capture from {b}")]))
+            .collect(),
+    ) else {
         return;
     };
+    let browser = browsers[b_idx].clone();
 
     // Network multi-select with an "All" shortcut. Plugin-backed networks
     // (threads) only appear while their plugin is enabled.
-    clear_screen();
     let mut networks: Vec<&str> = vec!["instagram", "tiktok", "twitter", "vsco"];
     if crate::plugins::threads_enabled() {
         networks.push("threads");
     }
-    let mut net_opts: Vec<String> = vec!["All networks".into()];
-    net_opts.extend(networks.iter().map(|s| super::theme::brand_site_label(s)));
-    let Ok(picked_raw): Result<Vec<String>, _> = MultiSelect::new("Which networks?", net_opts)
-        .without_filtering()
-        .with_render_config(render_config())
-        .with_help_message("[space to select · enter to confirm]")
-        .prompt()
-    else {
+    let net_opts: Vec<(String, Vec<String>)> = {
+        let mut v = vec![("All networks".to_string(), vec!["select all".to_string()])];
+        v.extend(networks.iter().map(|s| {
+            (
+                super::theme::brand_site_label(s),
+                vec![format!("domain: {}", s)],
+            )
+        }));
+        v
+    };
+    let Some(picked_idxs) = crate::cli::interactive::menu::pick_multi(
+        "Configuration ─ Cookie capture ─ Networks",
+        net_opts.clone(),
+        &[],
+    ) else {
         return;
     };
+    let picked_raw: Vec<String> = picked_idxs
+        .into_iter()
+        .filter_map(|i| net_opts.get(i).map(|(l, _)| l.clone()))
+        .collect();
     if picked_raw.is_empty() {
         println!("ℹ No networks selected");
         return;
@@ -628,8 +659,7 @@ pub(super) fn manage_sites() {
             entries.retain(|n| n != "threads");
         }
         use crate::cli::interactive::theme::SiteItem;
-        let mut options: Vec<SiteItem> = vec![SiteItem::new("Create new site")];
-        options.extend(entries.iter().map(|e| SiteItem::new(e.clone())));
+        let mut options: Vec<SiteItem> = entries.iter().map(|e| SiteItem::new(e.clone())).collect();
         options.push(SiteItem::new("Back"));
 
         let choice = match select_menu("Manage Sites", options).prompt() {
@@ -639,49 +669,7 @@ pub(super) fn manage_sites() {
         if choice == "Back" {
             return;
         }
-        if choice == "Create new site" {
-            let name = match Text::new("Site name (filename without .toml):")
-                .with_render_config(render_config())
-                .with_placeholder("instagram")
-                .with_help_message("use [a-z0-9_-], e.g. instagram, twitter, pixiv")
-                .prompt()
-            {
-                Ok(s) => s.trim().to_string(),
-                Err(_) => continue,
-            };
-            if name.is_empty() || name.contains('/') || name.contains('.') {
-                eprintln!("error: invalid name");
-                continue;
-            }
-            let path = dir.join(format!("{name}.toml"));
-            if path.exists() {
-                eprintln!("error: {name}.toml already exists, choose Edit");
-                continue;
-            }
-            // create minimal template with comments then open editor
-            if let Err(e) = crate::config::ensure_example_sites() {
-                // ensure at least dir exists, then create empty file
-                let _ = e;
-            }
-            // If it's instagram name we already have template, otherwise create generic
-            if !path.exists() {
-                if name == "tiktok" {
-                    let minimal = "# scrapmf site — tiktok minimal\n# File: ~/.config/scrapmf/sites/tiktok.toml (0o600, dir 0o700)\n# pattern auto-matches https://www.tiktok.com/@user\nsite = \"tiktok\"\npattern = \"tiktok.com\"\n";
-                    let _ = std::fs::write(&path, minimal);
-                } else {
-                    let generic = format!(
-                        "# scrapmf site — {name}\n# See sites/instagram.toml for all options\nsite = \"{name}\"\npattern = \"{name}.com\"\n"
-                    );
-                    let _ = std::fs::write(&path, generic);
-                }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-                }
-            }
-            edit_with_editor(&path);
-        } else if entries.contains(&choice) {
+        if entries.contains(&choice) {
             // Selected an existing site — open its submenu
             site_submenu(&choice, &dir);
         }

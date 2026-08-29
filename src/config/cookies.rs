@@ -15,16 +15,9 @@ use std::path::{Path, PathBuf};
 // ─── Site domains ───────────────────────────────────────────────────────────
 
 /// Domains (as they appear in cookie files / moz_cookies.host_key) per site key.
+/// Delegates to the central `crate::sites` registry — single source of truth.
 pub fn domains_for_site(site_key: &str) -> &'static [&'static str] {
-    match site_key {
-        "instagram" => &["instagram.com"],
-        "tiktok" => &["tiktok.com"],
-        "twitter" | "x" => &["twitter.com", "x.com"],
-        "vsco" => &["vsco.co"],
-        "threads" => &["threads.com", "threads.net"],
-        "facebook" | "fb" => &["facebook.com", "fb.com"],
-        _ => &[],
-    }
+    crate::sites::registry::domains_for_site(site_key)
 }
 
 // ─── Storage ────────────────────────────────────────────────────────────────
