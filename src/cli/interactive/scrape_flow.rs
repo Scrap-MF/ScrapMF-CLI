@@ -7,7 +7,7 @@ use crate::application::scraper::{ScrapeRequest, validate_url};
 use crate::config;
 
 use super::content::{ContentKind, build_tagged_urls, prompt_content_kinds, select_urls};
-use super::{ask_nonempty, select_menu};
+use super::select_menu;
 
 /// Ask whether this run should use a named cookie profile instead of the
 /// site defaults. Returns the profile path when overridden.
@@ -702,7 +702,15 @@ pub(super) fn prompt_quick_scrape() {
     } else {
         "Username (without @):"
     };
-    let raw_input = match ask_nonempty(prompt_text) {
+    let raw_input = match crate::cli::interactive::menu::input_text(
+        &format!("Download content ─ {site_name}"),
+        prompt_text,
+        "someuser",
+        "",
+    )
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
+    {
         Some(s) => s,
         None => return,
     };
