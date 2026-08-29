@@ -61,7 +61,7 @@ pub(super) fn content_options(site: &str) -> Vec<&'static str> {
         // vsco: photos AND videos share the gallery folder (single pass)
         "vsco" => vec!["All", "Media", "Profile"],
         "threads" => vec!["All", "Photos", "Videos", "Profile"],
-        "facebook" => vec!["All", "Posts", "Albums", "Videos", "Profile"],
+        "facebook" => vec!["All", "Posts", "Albums", "Videos"],
         _ => vec!["All", "Posts"],
     }
 }
@@ -132,10 +132,6 @@ pub(super) fn build_tagged_urls(site: &str, username: &str) -> Vec<(ContentKind,
             (
                 ContentKind::Videos,
                 format!("https://www.facebook.com/{username}/videos/"),
-            ),
-            (
-                ContentKind::Profile,
-                format!("https://www.facebook.com/{username}/avatar"),
             ),
         ],
         "threads" => vec![

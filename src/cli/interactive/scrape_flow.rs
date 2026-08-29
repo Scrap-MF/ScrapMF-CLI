@@ -832,10 +832,6 @@ pub(super) fn prompt_quick_scrape() {
                 ContentKind::Videos,
                 format!("https://www.facebook.com/profile.php?id={id}/videos/"),
             ),
-            (
-                ContentKind::Profile,
-                format!("https://www.facebook.com/profile.php?id={id}/avatar"),
-            ),
         ]
     } else {
         build_tagged_urls(&site_name, &username)
