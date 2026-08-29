@@ -112,6 +112,66 @@ pub fn collect(verbose: u8) -> (Vec<CheckLine>, bool) {
         }
     }
 
+    // Keyring diagnostics — Arch pacman + kwallet por defecto, engloba futuros keyring/cifrados
+    {
+        let has_secret_tool = which::which("secret-tool").is_ok();
+        let has_kwallet = which::which("kwallet-query").is_ok();
+        out.push(CheckLine {
+            level: if has_secret_tool {
+                Level::Success
+            } else {
+                Level::Info
+            },
+            text: format!(
+                "secret-tool (libsecret): {}",
+                if has_secret_tool {
+                    "found"
+                } else {
+                    "not found — pacman -S libsecret"
+                }
+            ),
+        });
+        out.push(CheckLine {
+            level: if has_kwallet {
+                Level::Success
+            } else {
+                Level::Info
+            },
+            text: format!(
+                "kwallet-query (KDE): {}",
+                if has_kwallet {
+                    "found — KWallet active"
+                } else {
+                    "not found — optional, for KDE kwallet"
+                }
+            ),
+        });
+        if let Some(home) = dirs::home_dir() {
+            let brave_path = home.join(".config/BraveSoftware/Brave-Browser/Default/Cookies");
+            let brave_flatpak = home.join(
+                ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser/Default/Cookies",
+            );
+            let found = brave_path.is_file() || brave_flatpak.is_file();
+            let size = std::fs::metadata(&brave_path)
+                .or_else(|_| std::fs::metadata(&brave_flatpak))
+                .map(|m| m.len())
+                .unwrap_or(0);
+            out.push(CheckLine {
+                level: if found { Level::Success } else { Level::Info },
+                text: format!(
+                    "Brave Cookies DB: {} ({} bytes){}",
+                    if found { "found" } else { "not found" },
+                    size,
+                    if found {
+                        ""
+                    } else {
+                        " — pacman: ~/.config/BraveSoftware/..., flatpak: ~/.var/app/..."
+                    }
+                ),
+            });
+        }
+    }
+
     // Check resolved backend binary is reachable
     if crate::application::backend::gallery_dl_executable().is_ok() {
         tracing::debug!("backend resolution OK");
