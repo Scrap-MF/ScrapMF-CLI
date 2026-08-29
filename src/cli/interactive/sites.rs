@@ -659,8 +659,7 @@ pub(super) fn manage_sites() {
             entries.retain(|n| n != "threads");
         }
         use crate::cli::interactive::theme::SiteItem;
-        let mut options: Vec<SiteItem> = vec![SiteItem::new("Create new site")];
-        options.extend(entries.iter().map(|e| SiteItem::new(e.clone())));
+        let mut options: Vec<SiteItem> = entries.iter().map(|e| SiteItem::new(e.clone())).collect();
         options.push(SiteItem::new("Back"));
 
         let choice = match select_menu("Manage Sites", options).prompt() {
@@ -670,49 +669,7 @@ pub(super) fn manage_sites() {
         if choice == "Back" {
             return;
         }
-        if choice == "Create new site" {
-            let name = match Text::new("Site name (filename without .toml):")
-                .with_render_config(render_config())
-                .with_placeholder("instagram")
-                .with_help_message("use [a-z0-9_-], e.g. instagram, twitter, pixiv")
-                .prompt()
-            {
-                Ok(s) => s.trim().to_string(),
-                Err(_) => continue,
-            };
-            if name.is_empty() || name.contains('/') || name.contains('.') {
-                eprintln!("error: invalid name");
-                continue;
-            }
-            let path = dir.join(format!("{name}.toml"));
-            if path.exists() {
-                eprintln!("error: {name}.toml already exists, choose Edit");
-                continue;
-            }
-            // create minimal template with comments then open editor
-            if let Err(e) = crate::config::ensure_example_sites() {
-                // ensure at least dir exists, then create empty file
-                let _ = e;
-            }
-            // If it's instagram name we already have template, otherwise create generic
-            if !path.exists() {
-                if name == "tiktok" {
-                    let minimal = "# scrapmf site — tiktok minimal\n# File: ~/.config/scrapmf/sites/tiktok.toml (0o600, dir 0o700)\n# pattern auto-matches https://www.tiktok.com/@user\nsite = \"tiktok\"\npattern = \"tiktok.com\"\n";
-                    let _ = std::fs::write(&path, minimal);
-                } else {
-                    let generic = format!(
-                        "# scrapmf site — {name}\n# See sites/instagram.toml for all options\nsite = \"{name}\"\npattern = \"{name}.com\"\n"
-                    );
-                    let _ = std::fs::write(&path, generic);
-                }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-                }
-            }
-            edit_with_editor(&path);
-        } else if entries.contains(&choice) {
+        if entries.contains(&choice) {
             // Selected an existing site — open its submenu
             site_submenu(&choice, &dir);
         }
