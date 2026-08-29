@@ -238,6 +238,17 @@ pub fn input_text(context: &str, prompt: &str, placeholder: &str, help: &str) ->
     }
 }
 
+/// Generic nonempty input inside the box — loops until nonempty or cancel.
+pub fn ask_nonempty(context: &str, prompt: &str) -> Option<String> {
+    loop {
+        let s = input_text(context, prompt, "", "")?;
+        let t = s.trim().to_string();
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::chrome_title;
