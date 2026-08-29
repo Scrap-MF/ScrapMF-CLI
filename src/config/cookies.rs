@@ -452,20 +452,88 @@ fn chromium_paths(browser: &str) -> Option<ChromiumPaths> {
         _ => return None,
     };
     let home = dirs::home_dir()?;
-    Some(ChromiumPaths {
-        cookies_db: home
-            .join(".config")
+    let candidates = [
+        home.join(".config")
             .join(base)
             .join("Default")
             .join("Cookies"),
+        home.join(".var/app/com.brave.Browser/config")
+            .join(base)
+            .join("Default")
+            .join("Cookies"),
+        home.join(".var/app/com.google.Chrome/config")
+            .join(base)
+            .join("Default")
+            .join("Cookies"),
+        home.join("snap/brave/common/.config")
+            .join(base)
+            .join("Default")
+            .join("Cookies"),
+        home.join("snap/chromium/common/chromium")
+            .join("Default")
+            .join("Cookies"),
+    ];
+    let cookies_db = candidates
+        .iter()
+        .find(|p| p.is_file())
+        .cloned()
+        .unwrap_or_else(|| {
+            home.join(".config")
+                .join(base)
+                .join("Default")
+                .join("Cookies")
+        });
+    Some(ChromiumPaths {
+        cookies_db,
         service: service.to_string(),
     })
 }
 
+/// Try to read a password from KWallet (KDE) — `kwallet-query` if available.
+/// Brave/Chromium store "Brave Safe Storage" / "Chromium Safe Storage" in
+/// folder "Chromium Keys" in wallet "kdewallet".
+fn kwallet_candidate_passwords(service: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if which::which("kwallet-query").is_err() {
+        return out;
+    }
+    // Mapping service -> kwallet entry name
+    let entry = match service {
+        "brave" => "Brave Safe Storage",
+        "chrome" => "Chromium Safe Storage",
+        "chromium" => "Chromium Safe Storage",
+        "vivaldi" => "Vivaldi Safe Storage",
+        "opera" => "Opera Safe Storage",
+        _ => return out,
+    };
+    for args in [
+        vec!["kdewallet", "-f", "Chromium Keys", "-r", entry],
+        vec![
+            "kdewallet",
+            "--folder",
+            "Chromium Keys",
+            "--read-password",
+            entry,
+        ],
+    ] {
+        if let Ok(output) = std::process::Command::new("kwallet-query")
+            .args(&args)
+            .output()
+            && output.status.success()
+        {
+            let secret = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !secret.is_empty() {
+                out.push(secret);
+            }
+        }
+    }
+    out
+}
+
 /// Candidate passwords for the browser's cookie key, most likely first:
+/// Secret Service → KWallet (KDE) → legacy "peanuts".
 /// Secret Service entry (attribute application=<browser>) — schema v2 wraps
-/// it BASE64-ENCODED, so both decoded and raw forms are tried — then the
-/// legacy hard-coded "peanuts".
+/// it BASE64-ENCODED, so both decoded and raw forms are tried.
 fn chromium_candidate_passwords(service: &str) -> Vec<String> {
     use base64::Engine;
     let mut out = Vec::new();
@@ -482,6 +550,12 @@ fn chromium_candidate_passwords(service: &str) -> Vec<String> {
                 out.push(txt);
             }
             out.push(secret);
+        }
+    }
+    // KWallet fallback (Arch + KDE, kwallet active by default even without GNOME)
+    for pw in kwallet_candidate_passwords(service) {
+        if !out.contains(&pw) {
+            out.push(pw);
         }
     }
     out.push("peanuts".to_string());
@@ -663,9 +737,26 @@ pub fn capture_chromium(
         }
 
         if cookies.is_empty() {
+            let tried = format!(
+                "tried {} key(s) (secret-tool:{}, kwallet-query:{}, peanuts:yes), Cookies at {} ({} bytes)",
+                candidate_keys.len(),
+                if which::which("secret-tool").is_ok() {
+                    "found"
+                } else {
+                    "not-found"
+                },
+                if which::which("kwallet-query").is_ok() {
+                    "found"
+                } else {
+                    "not-found"
+                },
+                paths.cookies_db.display(),
+                std::fs::metadata(&paths.cookies_db)
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+            );
             return Err(format!(
-                "no cookies could be decrypted for {} — if your desktop \
-                 keyring is locked, unlock it or use manual import instead",
+                "no cookies could be decrypted for {} — {tried}\n  help: Arch pacman + kwallet por defecto → unlock KWallet at login or install libsecret (secret-tool), or capture from Firefox (no decryption): Configuration → Cookie profiles → Create → Firefox\n  help: or manual import: Install \"Get cookies.txt LOCALLY\" in {browser} → Export → Configuration → Cookie profiles → Import → From paste",
                 domains.join(", ")
             ));
         }
