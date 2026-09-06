@@ -245,6 +245,13 @@ pub(super) fn preview_and_execute(
                 let lines = format_job_outcome(&result, site, username);
                 let log_path = runlog.borrow().path.display().to_string();
                 drop(runlog);
+                // Termux MediaScan — single dir scan per finished download (quick/saved/url)
+                if result.is_ok() {
+                    let dir = crate::config::expand_output_dir(
+                        req.output.as_ref().unwrap_or(&cfg.general.output_dir),
+                    );
+                    crate::application::media_scan::maybe_scan(&dir);
+                }
                 let mut rep = lines;
                 if failed && !log_path.is_empty() {
                     rep.push((true, format!("log: {log_path}")));
@@ -283,6 +290,12 @@ pub(super) fn preview_and_execute(
         );
         let result = crate::application::scraper::scrape(&req, false);
         report_job_outcome(&result, &site, &username);
+        if result.is_ok() {
+            let dir = crate::config::expand_output_dir(
+                req.output.as_ref().unwrap_or(&cfg.general.output_dir),
+            );
+            crate::application::media_scan::maybe_scan(&dir);
+        }
     }
 }
 
