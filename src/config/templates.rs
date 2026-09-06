@@ -521,6 +521,15 @@ pub fn ensure_vsco_site() -> anyhow::Result<()> {
     crate::config::fs::restrict_perms(&dir, true);
     let target = dir.join("vsco.toml");
     if target.exists() {
+        // Migrate old {id}_{date} → {date}_{id} (date first for ls chronology)
+        if let Ok(existing) = std::fs::read_to_string(&target)
+            && existing.contains("{id}_{date")
+        {
+            let fixed = existing.replace("{id}_{date:%Y-%m-%d}", "{date:%Y-%m-%d}_{id}");
+            if fixed != existing {
+                let _ = write_config_file(&target, &fixed);
+            }
+        }
         return Ok(());
     }
 
@@ -542,7 +551,7 @@ pub fn ensure_vsco_site() -> anyhow::Result<()> {
     gallery_table.insert("directory".to_string(), dir4("gallery"));
     gallery_table.insert(
         "filename".to_string(),
-        toml::Value::String("{id}_{date:%Y-%m-%d}.{extension}".to_string()),
+        toml::Value::String("{date:%Y-%m-%d}_{id}.{extension}".to_string()),
     );
     extractor.insert(
         "vsco:gallery".to_string(),
@@ -587,7 +596,7 @@ pub fn ensure_vsco_site() -> anyhow::Result<()> {
 #   PERFIL/  (scrapmf_root = profile name; output default ~/scrapmf)
 #   └── vsco/
 #       └── CUENTA/  ({user} handle)
-#           ├── gallery/   → {id}_{date:%Y-%m-%d}.{ext}  (/@USER/gallery — photos AND videos together, single pass)
+#           ├── gallery/   → {date:%Y-%m-%d}_{id}.{ext}  (/@USER/gallery — photos AND videos together, single pass, date first)
 #           └── profile/   → avatar_{id}.{ext}           (/@USER/avatar; {id}=profileImageId changes per pic version)
 #
 #   AUTH: NOT required — VSCO works anonymously (API token auto-extracted
