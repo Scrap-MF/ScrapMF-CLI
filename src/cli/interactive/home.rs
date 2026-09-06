@@ -75,10 +75,20 @@ fn detail_lines(action: Action) -> Vec<String> {
                 String::new(),
             ];
             for def in crate::plugins::REGISTRY {
-                let status = match crate::plugins::threads_state() {
-                    crate::plugins::PluginState::Enabled(v) => format!("enabled ({v})"),
-                    crate::plugins::PluginState::Disabled => "disabled (files kept)".to_string(),
-                    crate::plugins::PluginState::NotInstalled => "not installed".to_string(),
+                let status = match def.id {
+                    "threads" => match crate::plugins::threads_state() {
+                        crate::plugins::PluginState::Enabled(v) => format!("enabled ({v})"),
+                        crate::plugins::PluginState::Disabled => {
+                            "disabled (files kept)".to_string()
+                        }
+                        crate::plugins::PluginState::NotInstalled => "not installed".to_string(),
+                    },
+                    "termux-scan" => match crate::plugins::termux_scan_state() {
+                        crate::plugins::PluginState::Enabled(v) => format!("enabled ({v})"),
+                        crate::plugins::PluginState::Disabled => "disabled".to_string(),
+                        crate::plugins::PluginState::NotInstalled => "not installed".to_string(),
+                    },
+                    _ => "not installed".to_string(),
                 };
                 lines.push(format!("  · {} by {}: {}", def.title, def.vendor, status));
             }

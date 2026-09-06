@@ -22,7 +22,7 @@ pub struct Config {
 /// Optional site-provider plugins (see `crate::plugins`). Files live under
 /// `$XDG_DATA_HOME/scrapmf/plugins/`; this section only carries user toggles.
 #[non_exhaustive]
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Plugins {
     /// threads plugin manually disabled from the Plugins menu while keeping
     /// its installed files (re-enable without re-downloading).
@@ -33,6 +33,15 @@ pub struct Plugins {
     /// download (quick / saved profile / url / CLI). Best-effort, never fails.
     #[serde(default = "default_true")]
     pub termux_scan_disabled: bool,
+}
+
+impl Default for Plugins {
+    fn default() -> Self {
+        Self {
+            threads_disabled: false,
+            termux_scan_disabled: true,
+        }
+    }
 }
 
 /// Backend resolution overrides. By default scrapmf uses its own bundled,
