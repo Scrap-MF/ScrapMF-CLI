@@ -86,6 +86,21 @@ pub fn collect(verbose: u8) -> (Vec<CheckLine>, bool) {
                     .to_string(),
             }),
         }
+        match crate::plugins::termux_scan_state() {
+            PluginState::Enabled(_) => out.push(CheckLine {
+                level: Level::Success,
+                text: "plugins: termux-scan enabled (termux-media-scan)".to_string(),
+            }),
+            PluginState::Disabled => out.push(CheckLine {
+                level: Level::Info,
+                text: "plugins: termux-scan disabled — enable in scrapmf → Plugins for Android gallery scan"
+                    .to_string(),
+            }),
+            PluginState::NotInstalled => out.push(CheckLine {
+                level: Level::Info,
+                text: "plugins: termux-scan not installed (termux-media-scan not found) — install termux:api app + pkg install termux-api, then enable in Plugins".to_string(),
+            }),
+        }
     }
 
     // Check browsers for cookies

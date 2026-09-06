@@ -27,6 +27,11 @@ pub struct Plugins {
     /// its installed files (re-enable without re-downloading).
     #[serde(default)]
     pub threads_disabled: bool,
+    /// termux media-scan plugin disabled by default (opt-in). When enabled,
+    /// scrapmf runs `termux-media-scan <scrapmf_dir>` once per finished
+    /// download (quick / saved profile / url / CLI). Best-effort, never fails.
+    #[serde(default = "default_true")]
+    pub termux_scan_disabled: bool,
 }
 
 /// Backend resolution overrides. By default scrapmf uses its own bundled,

@@ -44,11 +44,18 @@ pub struct PluginDef {
 }
 
 /// Every plugin scrapmf knows about, in menu order.
-pub const REGISTRY: &[PluginDef] = &[PluginDef {
-    id: "threads",
-    title: "ThreadstractorMF",
-    vendor: "MFApplications",
-}];
+pub const REGISTRY: &[PluginDef] = &[
+    PluginDef {
+        id: "threads",
+        title: "ThreadstractorMF",
+        vendor: "MFApplications",
+    },
+    PluginDef {
+        id: "termux-scan",
+        title: "Termux MediaScan",
+        vendor: "Termux",
+    },
+];
 
 /// Look up a plugin by id.
 pub fn by_id(id: &str) -> Option<&'static PluginDef> {
@@ -148,6 +155,47 @@ pub fn threads_state() -> PluginState {
 /// Shorthand used by UI gating: true only when the plugin can be used.
 pub fn threads_enabled() -> bool {
     matches!(threads_state(), PluginState::Enabled(_))
+}
+
+// ─── Termux MediaScan (lightweight, no venv) ──────────────────────────────────
+
+fn is_termux_env() -> bool {
+    std::env::var_os("TERMUX_VERSION").is_some()
+        || std::env::var_os("PREFIX").is_some_and(|p| p.to_string_lossy().contains("com.termux"))
+}
+
+/// Whether termux-media-scan is usable on this host (Termux + binary present).
+pub fn is_termux_available() -> bool {
+    which::which("termux-media-scan").is_ok()
+}
+
+/// Current termux-scan plugin state (no venv, just toggle + binary check).
+pub fn termux_scan_state() -> PluginState {
+    let disabled = crate::config::load()
+        .map(|c| c.plugins.termux_scan_disabled)
+        .unwrap_or(true); // disabled by default (opt-in)
+    if disabled {
+        return PluginState::Disabled;
+    }
+    if is_termux_available() {
+        PluginState::Enabled("termux-media-scan".to_string())
+    } else if is_termux_env() {
+        // Termux without termux-api installed — show as NotInstalled with help
+        PluginState::NotInstalled
+    } else {
+        // Non-Termux: treat as Disabled (silent no-op, never fails)
+        PluginState::Disabled
+    }
+}
+
+pub fn termux_scan_enabled() -> bool {
+    matches!(termux_scan_state(), PluginState::Enabled(_))
+}
+
+pub fn set_termux_scan_disabled(disabled: bool) -> anyhow::Result<()> {
+    crate::config::update(|cfg| {
+        cfg.plugins.termux_scan_disabled = disabled;
+    })
 }
 
 // ─── Binary resolution ──────────────────────────────────────────────────────
