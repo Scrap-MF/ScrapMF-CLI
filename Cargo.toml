@@ -65,3 +65,7 @@ unsafe_code = "forbid"
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "warn"
+
+[package.metadata.cargo-semver-checks.lints]
+struct_marked_non_exhaustive = "allow"
+constructible_struct_adds_field = "allow"
