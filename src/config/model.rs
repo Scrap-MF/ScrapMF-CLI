@@ -21,6 +21,7 @@ pub struct Config {
 
 /// Optional site-provider plugins (see `crate::plugins`). Files live under
 /// `$XDG_DATA_HOME/scrapmf/plugins/`; this section only carries user toggles.
+#[non_exhaustive]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Plugins {
     /// threads plugin manually disabled from the Plugins menu while keeping
