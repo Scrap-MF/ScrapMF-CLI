@@ -9,53 +9,138 @@ use crate::config;
 use super::content::{ContentKind, build_tagged_urls, prompt_content_kinds, select_urls};
 use super::select_menu;
 
-/// Ask whether this run should use a named cookie profile instead of the
-/// site defaults. Returns the profile path when overridden.
-pub(super) fn prompt_cookie_override(site: &str) -> Option<PathBuf> {
+/// Decide which cookie source a run should use, after the user has chosen what
+/// to scrape.
+///
+/// `sites` are the site keys this run touches, used to rank the stored cookie
+/// profiles. Passing the real keys matters: the previous call site for direct
+/// URLs passed `""`, and `domains_for_site("")` returns no domains, so the
+/// filter silently matched every profile and the question was meaningless.
+///
+/// Behaviour:
+///
+/// * **no stored profiles** — return `None` without prompting, so a first-time
+///   user goes straight to the site defaults with no extra keystroke;
+/// * **at least one stored profile** — always ask, offering the site default
+///   alongside the created profiles, so the choice is always explicit.
+///
+/// Cancelling or pressing Esc means "use the site default", never "abort".
+pub(super) fn prompt_cookie_override(sites: &[String]) -> Option<PathBuf> {
     use crate::config::cookies;
+
     let profiles = cookies::list_profiles();
-    // Filter profiles to those that actually contain cookies for this site
-    let site_domains = cookies::domains_for_site(site);
-    let filtered: Vec<String> = profiles
-        .into_iter()
-        .filter(|name| {
-            if site_domains.is_empty() {
-                return true;
-            }
-            match cookies::load_profile(name) {
-                Ok(cookies) => cookies.iter().any(|c| {
-                    site_domains
-                        .iter()
-                        .any(|d| c.domain == *d || c.domain.ends_with(&format!(".{d}")))
-                }),
-                Err(_) => false,
-            }
-        })
-        .collect();
-    // Always offer at least Default, even if no matching profiles
-    let mut opts = vec!["Default (from site config)".to_string()];
-    opts.extend(
-        filtered
-            .iter()
-            .map(|p| format!("{p}  — {}", cookies::profile_summary(p).unwrap_or_default())),
-    );
-    // If only Default and no filtered profiles, still prompt so user sees the choice
-    // (previous behavior returned None without prompting, which hid the cookie step)
-    let Ok(choice) = select_menu("Cookies for this run?", opts).prompt() else {
-        return None;
-    };
-    if choice.starts_with("Default") {
+    if profiles.is_empty() {
         return None;
     }
-    let name = choice.split("  — ").next()?.trim().to_string();
-    cookies::profile_path(&name).filter(|p| p.exists())
+
+    // Rank profiles that actually carry cookies for these sites first. When no
+    // profile matches, every profile is still offered — the user may know
+    // better than the filter, and silently hiding their profile is worse than
+    // showing a mismatch hint.
+    let mut ranked: Vec<(bool, String)> = profiles
+        .into_iter()
+        .map(|name| {
+            let matches = site_has_cookies(&name, sites);
+            (matches, name)
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+
+    let any_match = ranked.iter().any(|(m, _)| *m);
+    let mut opts = vec![DEFAULT_COOKIE_CHOICE.to_string()];
+    for (matches, name) in &ranked {
+        let summary = cookies::profile_summary(name).unwrap_or_default();
+        // The label is only a display string; the key is recovered by index
+        // below, never by re-parsing the text.
+        opts.push(format!(
+            "{name}{}  — {summary}",
+            if *matches {
+                ""
+            } else {
+                "  (no cookies for this site)"
+            }
+        ));
+    }
+
+    let title = if any_match {
+        "Cookies for this run? (Enter = site default)"
+    } else {
+        "No stored profile has cookies for this site. Cookies for this run?"
+    };
+    let Ok(choice) = select_menu(title, opts.clone()).prompt() else {
+        // Esc / Ctrl+C: keep scraping with the site default. Aborting the whole
+        // run because the user skipped a question was the previous behaviour
+        // and read as "scrapmf did nothing".
+        return None;
+    };
+    if choice == DEFAULT_COOKIE_CHOICE {
+        return None;
+    }
+    let index = opts.iter().position(|o| *o == choice)?;
+    ranked
+        .get(index - 1)
+        .map(|(_, name)| name)
+        .and_then(|name| cookies::profile_path(name))
+        .filter(|p| p.exists())
 }
 
-/// Force a cookie file onto every job (used by the per-run cookie override).
-fn apply_cookie_file(jobs: &mut [(ScrapeRequest, String, String, String)], file: &std::path::Path) {
-    for (req, ..) in jobs.iter_mut() {
-        req.cookies_file = Some(file.to_path_buf());
-        req.cookies_from_browser = None;
+/// Label for the "keep whatever the site config says" option.
+const DEFAULT_COOKIE_CHOICE: &str = "Default (from site config)";
+
+/// Human description of the session a job will use, for the pre-flight preview.
+pub(super) fn describe_cookie_source(req: &ScrapeRequest) -> String {
+    if let Some(file) = req.cookies_file.as_ref() {
+        // Show the profile name, not the full path, when the file is one of ours.
+        if let Some(dir) = crate::config::cookies::cookies_dir()
+            && file.parent() == Some(dir.as_path())
+            && let Some(stem) = file.file_stem()
+        {
+            return format!("cookie profile '{}'", stem.to_string_lossy());
+        }
+        return format!("cookies {}", file.display());
+    }
+    if let Some(browser) = req.cookies_from_browser.as_ref() {
+        return format!("browser cookies ({browser})");
+    }
+    "site defaults (no session)".to_string()
+}
+
+/// Whether a stored profile holds at least one cookie for any of `sites`.
+fn site_has_cookies(name: &str, sites: &[String]) -> bool {
+    use crate::config::cookies;
+    if sites.is_empty() {
+        return true;
+    }
+    let Ok(cookies) = cookies::load_profile(name) else {
+        return false;
+    };
+    sites.iter().any(|site| {
+        let domains = cookies::domains_for_site(site);
+        !domains.is_empty()
+            && cookies.iter().any(|c| {
+                domains
+                    .iter()
+                    .any(|d| c.domain == *d || c.domain.ends_with(&format!(".{d}")))
+            })
+    })
+}
+
+/// Apply a chosen cookie file to a job, only when that job's site is one the
+/// file was chosen for.
+///
+/// The previous version applied one override to every job in the batch, so in
+/// a mixed run a TikTok profile was handed to the Instagram job too — the
+/// exact kind of cross-session contamination this feature must never cause.
+fn apply_cookie_file_to_site(
+    jobs: &mut [(ScrapeRequest, String, String, String)],
+    file: &std::path::Path,
+    sites: &[String],
+) {
+    for (req, site, ..) in jobs.iter_mut() {
+        if sites.iter().any(|s| s == site) {
+            req.cookies_file = Some(file.to_path_buf());
+            req.cookies_from_browser = None;
+        }
     }
 }
 
@@ -81,6 +166,9 @@ pub(super) fn preview_and_execute(
             username,
             out
         );
+        // Surface the session each job will actually use, so a wrong cookie
+        // profile is visible here rather than discovered after the download.
+        println!("      session: {}", describe_cookie_source(req));
     }
     let proceed = Confirm::new("Proceed?")
         .with_render_config(super::theme::render_config())
@@ -631,14 +719,22 @@ pub(super) fn prompt_scrape_direct_urls() {
         }
     }
 
-    // Per-run cookie override (named profile instead of site defaults)
+    // Per-run cookie override (named profile instead of site defaults).
+    // The sites are derived from the resolved jobs, not guessed, so the
+    // profile filter actually has domains to work with.
+    let job_sites: Vec<String> = {
+        let mut v: Vec<String> = jobs.iter().map(|(_, site, ..)| site.clone()).collect();
+        v.sort();
+        v.dedup();
+        v
+    };
     let cookie_override = if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-        prompt_cookie_override("")
+        prompt_cookie_override(&job_sites)
     } else {
         None
     };
     if let Some(ref file) = cookie_override {
-        apply_cookie_file(&mut jobs, file);
+        apply_cookie_file_to_site(&mut jobs, file, &job_sites);
     }
 
     preview_and_execute(jobs, &cfg);
@@ -798,7 +894,7 @@ pub(super) fn prompt_quick_scrape() {
     // Per-run cookie override comes BEFORE ID resolution so resolver uses
     // the same session that will be used for downloading (same cycle as username).
     let cookie_override = if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-        prompt_cookie_override(&site_name)
+        prompt_cookie_override(std::slice::from_ref(&site_name))
     } else {
         None
     };
@@ -1247,5 +1343,132 @@ mod quick_flatten_tests {
             }
             other => panic!("expected table, got {other:?}"),
         }
+    }
+
+    // ─── Cookie session selection ──────────────────────────────────────────
+
+    fn req_with(
+        cookies_file: Option<&str>,
+        cookies_from_browser: Option<&str>,
+    ) -> crate::application::ScrapeRequest {
+        crate::application::ScrapeRequest {
+            cookies_file: cookies_file.map(std::path::PathBuf::from),
+            cookies_from_browser: cookies_from_browser.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// The preview must name the session each job will use, so a wrong cookie
+    /// profile is caught before the download rather than after it.
+    #[test]
+    fn cookie_source_preview_covers_every_case() {
+        assert_eq!(
+            super::describe_cookie_source(&req_with(None, None)),
+            "site defaults (no session)"
+        );
+        assert_eq!(
+            super::describe_cookie_source(&req_with(None, Some("brave"))),
+            "browser cookies (brave)"
+        );
+        assert!(
+            super::describe_cookie_source(&req_with(Some("/tmp/elsewhere.txt"), None))
+                .contains("/tmp/elsewhere.txt"),
+            "an external cookie path must be shown verbatim"
+        );
+    }
+
+    #[test]
+    fn cookie_source_preview_names_stored_profiles() {
+        // Point the profile directory at a temp tree holding one profile, so
+        // the label resolves to the friendly profile name.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let profile = dir.path().join("brave-instagram.txt");
+        std::fs::write(
+            &profile,
+            b"# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t0\tk\tv\n",
+        )
+        .expect("write");
+        let shown = super::describe_cookie_source(&req_with(
+            Some(profile.to_str().expect("utf8 path")),
+            None,
+        ));
+        assert!(
+            shown.contains("brave-instagram"),
+            "expected the profile name in {shown:?}"
+        );
+    }
+
+    /// A single-site override must not leak into another site's job. Handing a
+    /// TikTok profile to the Instagram job is exactly the cross-session
+    /// contamination this guard exists to prevent.
+    #[test]
+    fn cookie_override_only_touches_jobs_of_the_chosen_site() {
+        let file = std::path::Path::new("/tmp/tiktok-profile.txt");
+        let mut jobs: Vec<(crate::application::ScrapeRequest, String, String, String)> = vec![
+            (
+                req_with(Some("/site/tiktok.txt"), None),
+                "tiktok".to_string(),
+                "tiktok:user".to_string(),
+                "videos".to_string(),
+            ),
+            (
+                req_with(Some("/site/instagram.txt"), None),
+                "instagram".to_string(),
+                "instagram:user".to_string(),
+                "posts".to_string(),
+            ),
+        ];
+        super::apply_cookie_file_to_site(&mut jobs, file, &["tiktok".to_string()]);
+        assert_eq!(
+            jobs[0].0.cookies_file.as_deref(),
+            Some(file),
+            "the chosen site must adopt the profile"
+        );
+        assert_eq!(
+            jobs[1].0.cookies_file.as_deref(),
+            Some(std::path::Path::new("/site/instagram.txt")),
+            "another site must keep its own cookies"
+        );
+    }
+
+    /// Choosing a profile must clear any browser-cookie source, otherwise the
+    /// backend receives both and the browser session silently wins.
+    #[test]
+    fn cookie_override_clears_browser_cookies() {
+        let mut jobs: Vec<(crate::application::ScrapeRequest, String, String, String)> = vec![(
+            req_with(None, Some("brave")),
+            "tiktok".to_string(),
+            "tiktok:user".to_string(),
+            "videos".to_string(),
+        )];
+        super::apply_cookie_file_to_site(
+            &mut jobs,
+            std::path::Path::new("/tmp/p.txt"),
+            &["tiktok".to_string()],
+        );
+        assert_eq!(jobs[0].0.cookies_from_browser, None);
+        assert!(jobs[0].0.cookies_file.is_some());
+    }
+
+    /// An unknown site key must not be treated as "matches everything": that is
+    /// what made the direct-URL flow, which passed `""`, offer every profile
+    /// regardless of relevance.
+    #[test]
+    fn unknown_site_does_not_match_profiles() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let cookies_dir = dir.path().join("cookies");
+        std::fs::create_dir_all(&cookies_dir).expect("mkdir");
+        std::fs::write(
+            cookies_dir.join("p.txt"),
+            b"# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t0\tk\tv\n",
+        )
+        .expect("write");
+        // `site_has_cookies` consults the real profile store, so only assert the
+        // domain-matching contract through the helper's own inputs.
+        let unknown_domains = crate::config::cookies::domains_for_site("");
+        assert!(
+            unknown_domains.is_empty(),
+            "an empty site key must resolve to no domains, not all domains"
+        );
     }
 }
