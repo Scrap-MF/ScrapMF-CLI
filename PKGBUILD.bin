@@ -3,7 +3,7 @@
 # See PKGBUILD for the build-from-source variant.
 #
 pkgname=scrapmf-bin
-pkgver=1.2.0
+pkgver=1.8.3
 pkgrel=1
 pkgdesc="Safe, interactive archiver for social media galleries (prebuilt binary, musl static)"
 arch=('x86_64')
@@ -13,8 +13,8 @@ optdepends=('gallery-dl: primary backend'
             'yt-dlp: reserved for future use (videos backend)')
 provides=('scrapmf')
 conflicts=('scrapmf')
-source=("scrapmf-$pkgver-x86_64-unknown-linux-musl.tar.gz::https://github.com/Scrap-MF/ScrapMF-CLI/releases/download/v$pkgver/scrapmf-x86_64-unknown-linux-musl.tar.gz")
-sha256sums=('6e983a207a6eedc75986ba0fabd4d260690d256b5cf1c0064873f06ea6300b76')
+source=("scrapmf-x86_64-unknown-linux-musl.tar.gz::https://github.com/Scrap-MF/ScrapMF-CLI/releases/download/v$pkgver/scrapmf-x86_64-unknown-linux-musl.tar.gz")
+sha256sums=('0950e67f371a6c6b1ad4a4f7262575c54f1acbc5b0b341f320c653a187e9795f')
 
 package() {
   install -Dm755 "scrapmf" "$pkgdir/usr/bin/scrapmf"
