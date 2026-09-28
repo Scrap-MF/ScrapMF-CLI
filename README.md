@@ -360,9 +360,33 @@ Versions are **derived from Conventional Commits** — never chosen by hand:
 | `feat:` | minor (1.1.0) |
 | `feat!:` / `BREAKING CHANGE` | major (2.0.0) |
 
-Flow ([release-plz](https://release-plz.dev)):
+#### One-time setup (required, not automatic)
 
-1. Work lands on `main` via merges from `develop`.
+The release workflow needs a **personal access token** configured as a
+repository secret. Without it the flow is silent-but-broken: release-plz can
+open the release PR, but the tag it pushes will not trigger `ci.yml`, so the
+version gets bumped with **no binaries published** — a release that looks
+complete and does not exist.
+
+1. GitHub → **Settings → Developer settings → Personal access tokens**
+   → **Fine-grained tokens** → Generate new token
+2. Resource owner `Scrap-MF`; Repository access → select only `ScrapMF-CLI`
+3. Repository permissions: **Contents: Read and write**, **Pull requests: Read and write**
+4. Repo → **Settings → Secrets and variables** → **Actions** → New repository secret
+5. Name `RELEASE_PLZ_TOKEN`, Secret = the token
+
+Why a PAT and not the built-in `GITHUB_TOKEN`: GitHub deliberately suppresses
+workflow triggers caused by its own automatic token, so the tag push would never
+wake the build matrix. See [release-plz's token docs](https://release-plz.dev/docs/github/token).
+
+The workflow now fails in a preflight step with these exact instructions if the
+secret is missing or empty, instead of an opaque `gh: Bad credentials (401)`.
+
+#### The flow
+
+([release-plz](https://release-plz.dev))
+
+1. Work lands on `main` (via merges from `develop`).
 2. The release-plz workflow opens a **"chore(release): vX.Y.Z" PR** with the
    version bump already applied to `Cargo.toml` / `Cargo.lock`.
 3. Merging that PR makes release-plz push the `vX.Y.Z` tag.
