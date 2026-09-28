@@ -175,21 +175,28 @@ pub fn collect(verbose: u8) -> (Vec<CheckLine>, bool) {
                 format!("kwallet (KDE): {}", kwallet_clients.join(", "))
             },
         });
-        // A v11 cookie DB cannot be decrypted without a D-Bus session. This is
-        // the single most common cause of "no cookies could be decrypted" on a
-        // KDE setup, because the wallet tools are installed but the shell that
-        // launches scrapmf has no session bus.
-        let dbus = std::env::var_os("DBUS_SESSION_BUS_ADDRESS")
-            .filter(|v| !v.is_empty())
-            .is_some();
+        // A v11 cookie DB cannot be decrypted without a D-Bus session. Report
+        // the socket that was actually located rather than merely whether
+        // DBUS_SESSION_BUS_ADDRESS is set: libdbus discovers the bus on its
+        // own, so an unset variable does not mean a broken keyring.
+        let bus = crate::config::cookies::resolve_dbus_address_for_doctor();
         out.push(CheckLine {
-            level: if dbus { Level::Success } else { Level::Warn },
-            text: if dbus {
-                "D-Bus session: available — keyring reachable".to_string()
+            level: if bus.is_some() {
+                Level::Success
             } else {
-                "D-Bus session: MISSING — browser cookies cannot be decrypted\n    \
-                 help: export DBUS_SESSION_BUS_ADDRESS=\"unix:path=/run/user/$(id -u)/bus\""
-                    .to_string()
+                Level::Warn
+            },
+            text: match &bus {
+                Some(addr) => format!("D-Bus session: reachable at {addr}"),
+                None if crate::config::cookies::keyring_outside_namespace_for_doctor() => {
+                    "D-Bus session: /run/user/<uid>/bus is NOT visible here (chroot, container \
+                     or bare TTY) — the OS keyring runs in the host session, so browser cookies \
+                     cannot be decrypted from in here"
+                        .to_string()
+                }
+                None => "D-Bus session: no bus found — browser cookies that need the keyring \
+                 cannot be decrypted (import them instead: Configuration → Cookie profiles)"
+                    .to_string(),
             },
         });
     }

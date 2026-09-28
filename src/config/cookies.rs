@@ -478,28 +478,122 @@ fn chromium_paths(browser: &str) -> Option<ChromiumPaths> {
     })
 }
 
-/// True when a D-Bus session bus is reachable from this process.
+/// Resolve the D-Bus session bus address, or `None` when there is no socket to
+/// talk to.
 ///
-/// Every OS keyring backend on Linux (libsecret/gnome-keyring, KWallet 5, KWallet
-/// 6) is a D-Bus *client*. Without `DBUS_SESSION_BUS_ADDRESS` none of them can
-/// be queried, so a `v11` cookie DB becomes undecryptable and the only
-/// recoverable advice is to fix the environment — not to retry the browser.
-fn dbus_available() -> bool {
-    std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some_and(|v| !v.is_empty())
+/// `DBUS_SESSION_BUS_ADDRESS` is **not** required: libdbus already falls back to
+/// the systemd user socket, so `secret-tool` and `kwalletctl6` find the bus
+/// without it. A previous version treated the missing variable as proof that
+/// the keyring was unreachable, which reported a working bus as broken and
+/// sent users to export a variable that was never the problem.
+///
+/// We still resolve the address ourselves for two reasons: to report the real
+/// state instead of guessing, and to inject it into the helper processes, which
+/// is what lets a keyring work from a shell that never inherited it.
+///
+/// Pure: the inputs are passed in rather than read from the environment, so
+/// this is testable without mutating process state (which needs `unsafe` on
+/// Rust 2024, and this crate forbids unsafe).
+fn resolve_dbus_address_in(
+    explicit: Option<&str>,
+    runtime_dir: Option<&str>,
+    uid: Option<u32>,
+) -> Option<String> {
+    let usable = |addr: &str| -> bool {
+        let addr = addr.trim();
+        !addr.is_empty() && !addr.contains("autolaunch:")
+    };
+
+    if let Some(addr) = explicit.map(str::trim).filter(|a| usable(a)) {
+        return Some(addr.to_string());
+    }
+    // systemd exports XDG_RUNTIME_DIR and places the bus beside it.
+    if let Some(dir) = runtime_dir.map(str::trim).filter(|d| !d.is_empty()) {
+        let candidate = format!("unix:path={dir}/bus");
+        if std::path::Path::new(&format!("{dir}/bus")).exists() {
+            return Some(candidate);
+        }
+    }
+    // Fall back to the conventional systemd location, deriving the uid from
+    // /proc/self/status. Absent inside a chroot or a bare TTY — which is exactly
+    // the case worth distinguishing in the error message.
+    if let Some(uid) = uid {
+        let dir = format!("/run/user/{uid}");
+        if std::path::Path::new(&format!("{dir}/bus")).exists() {
+            return Some(format!("unix:path={dir}/bus"));
+        }
+    }
+    None
 }
 
-/// Actionable message shown when decryption is impossible because D-Bus is
-/// missing. The three failure modes (no D-Bus, no wallet, locked wallet) need
-/// different fixes, so they must not be conflated.
-fn dbus_missing_error(display: &str) -> String {
+/// Real uid of this process, read from `/proc/self/status`.
+fn current_uid() -> Option<u32> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    status.lines().find_map(|line| {
+        let rest = line.strip_prefix("Uid:")?;
+        rest.split_whitespace().next()?.parse().ok()
+    })
+}
+
+/// The D-Bus session bus address, if one is reachable from this process.
+fn resolve_dbus_address() -> Option<String> {
+    resolve_dbus_address_in(
+        std::env::var("DBUS_SESSION_BUS_ADDRESS").ok().as_deref(),
+        std::env::var("XDG_RUNTIME_DIR").ok().as_deref(),
+        current_uid(),
+    )
+}
+
+/// Whether the conventional per-user bus socket is visible from here.
+///
+/// False inside a chroot or a bare TTY, where the keyring daemon lives in the
+/// host namespace and simply cannot be reached — a fact no amount of code in
+/// scrapmf can change, and one worth stating plainly instead of blaming the
+/// browser's password.
+fn keyring_outside_namespace() -> bool {
+    match current_uid() {
+        Some(uid) => !std::path::Path::new(&format!("/run/user/{uid}/bus")).exists(),
+        None => false,
+    }
+}
+
+/// Public wrappers so `doctor` can report the real D-Bus state without
+/// duplicating the discovery logic (and its reasoning) here.
+pub fn resolve_dbus_address_for_doctor() -> Option<String> {
+    resolve_dbus_address()
+}
+
+pub fn keyring_outside_namespace_for_doctor() -> bool {
+    keyring_outside_namespace()
+}
+
+/// Actionable message for a keyring that cannot be reached at all.
+///
+/// The advice is ordered by what actually works. In a chroot, exporting
+/// `DBUS_SESSION_BUS_ADDRESS` changes nothing — the socket is in the host
+/// namespace — so the keyring-free import path is offered first, and the chroot
+/// case is named explicitly instead of being lumped in with "no D-Bus".
+fn keyring_unreachable_error(display: &str) -> String {
+    let cause = if keyring_outside_namespace() {
+        format!(
+            "the D-Bus socket /run/user/<uid>/bus is not visible from here — this looks \
+             like a chroot, container or bare TTY, and the keyring daemon runs in the \
+             host session, so {display}'s encrypted cookies cannot be decrypted"
+        )
+    } else {
+        format!(
+            "no D-Bus session bus is reachable, so {display}'s encrypted cookies cannot \
+             be decrypted"
+        )
+    };
     format!(
-        "no D-Bus session in this terminal — the OS keyring is unreachable, so \
-         {display}'s encrypted cookies cannot be decrypted\n  \
-         help: export DBUS_SESSION_BUS_ADDRESS=\"unix:path=/run/user/$(id -u)/bus\"\n  \
+        "{cause}\n  \
+         help: skip the keyring entirely — in {display} install \"Get cookies.txt LOCALLY\", \
+         log in, Export, then Configuration → Cookie profiles → Import → From file\n  \
+         help: outside a chroot, run scrapmf from your desktop session, or set \
+         DBUS_SESSION_BUS_ADDRESS=\"unix:path=/run/user/$UID/bus\" (uid from 'id -u')\n  \
          note: this is an environment problem, not a scrapmf bug; libsecret and KWallet \
-         are both D-Bus clients and neither can be queried without it\n  \
-         note: run scrapmf from your desktop session, or use \
-         Configuration → Cookie profiles → Import → From paste"
+         are both D-Bus clients"
     )
 }
 
@@ -534,7 +628,16 @@ fn kwallet_candidate_passwords(folders: &[&str], entry: &str) -> Vec<String> {
                 vec!["kdewallet", "-f", folder, "-r", entry],
                 vec!["kdewallet", "--folder", folder, "--read-password", entry],
             ] {
-                let Ok(output) = std::process::Command::new(&bin_path).args(&args).output() else {
+                let mut cmd = std::process::Command::new(&bin_path);
+                cmd.args(&args);
+                // Hand the child a bus address explicitly. kwalletctl is a D-Bus
+                // client, and a shell that never inherited the session
+                // environment would otherwise leave it hunting for a socket it
+                // could have been told about.
+                if let Some(addr) = resolve_dbus_address() {
+                    cmd.env("DBUS_SESSION_BUS_ADDRESS", addr);
+                }
+                let Ok(output) = cmd.output() else {
                     continue;
                 };
                 if !output.status.success() {
@@ -583,10 +686,14 @@ fn chromium_candidate_passwords(
             ],
             vec!["lookup", "application", app],
         ] {
-            let Ok(output) = std::process::Command::new("secret-tool")
-                .args(&args)
-                .output()
-            else {
+            let mut cmd = std::process::Command::new("secret-tool");
+            cmd.args(&args);
+            // Same reasoning as kwalletctl: tell the child where the bus is
+            // rather than relying on the environment we may not have inherited.
+            if let Some(addr) = resolve_dbus_address() {
+                cmd.env("DBUS_SESSION_BUS_ADDRESS", addr);
+            }
+            let Ok(output) = cmd.output() else {
                 break;
             };
             if !output.status.success() {
@@ -811,17 +918,21 @@ pub fn capture_chromium(
             });
         }
 
-        // `v11` blobs are keyring-encrypted, so with no D-Bus session no
-        // candidate key can ever work. Say so now, instead of letting the user
-        // read a generic "could not decrypt" and start guessing.
+        // `v11` blobs need the OS keyring. The keyring is not always reachable
+        // — a chroot or bare TTY has no session bus — but the capture is still
+        // attempted, because libdbus discovers the bus on its own and an
+        // earlier version aborted here on the *absence of an environment
+        // variable*, reporting a working bus as broken. If nothing decrypts, the
+        // report below states what was actually reachable.
         let needs_keyring = first_blob
             .as_ref()
             .is_some_and(|b| b.starts_with(b"v11") || b.starts_with(b"v12"));
-        if needs_keyring && !dbus_available() {
-            return Err(dbus_missing_error(paths.display));
-        }
-        if needs_keyring && candidate_keys.is_empty() {
-            tracing::warn!("no keyring candidate available; decryption cannot succeed");
+        if needs_keyring {
+            tracing::debug!(
+                bus = resolve_dbus_address().is_some(),
+                candidates = candidate_keys.len(),
+                "cookie DB is keyring-encrypted"
+            );
         }
 
         // Pick the candidate key whose PKCS7 padding validates on the first
@@ -858,17 +969,35 @@ pub fn capture_chromium(
             } else {
                 "not-found"
             };
-            // Distinguish the three causes: the *tools* may all be installed and
-            // still be unable to answer, because the keyring may be locked, may
-            // not exist yet, or may be unreachable. An earlier version printed
-            // "pacman -S libsecret" unconditionally, which was wrong advice for
-            // a KDE user whose problem was a locked or absent KWallet folder.
-            let keyring_state = if !dbus_available() {
-                "no D-Bus session — keyring unreachable"
-            } else if candidate_keys.is_empty() {
-                "no safe-storage key found (wallet locked, or the entry has never been created — open the browser once)"
-            } else {
-                "keys found, but none decrypted the cookies"
+            // Report what was actually reachable, in the order that decides the
+            // next action. Inferring the cause from a missing environment
+            // variable — rather than from the bus and the wallet themselves —
+            // is what made an earlier version of this message report a working
+            // keyring as broken.
+            let bus = resolve_dbus_address();
+            let keyring_state = match (&bus, needs_keyring, candidate_keys.is_empty()) {
+                (None, true, _) if keyring_outside_namespace() => {
+                    "the D-Bus socket /run/user/<uid>/bus is not visible here (chroot, \
+                     container or bare TTY) — the keyring runs in the host session"
+                        .to_string()
+                }
+                (None, true, _) => {
+                    "no D-Bus session bus is reachable from this process".to_string()
+                }
+                (Some(addr), _, true) => format!(
+                    "bus found at {addr}, but no safe-storage key was returned — the wallet \
+                     is locked, or the entry has never been created (open the browser once)"
+                ),
+                (Some(_), _, false) => {
+                    "keys were found, but none decrypted the cookies (the keyring entry does \
+                     not match this profile)"
+                        .to_string()
+                }
+                (None, false, _) => {
+                    "the cookie database is not keyring-encrypted, so the keyring is not the \
+                     cause"
+                        .to_string()
+                }
             };
             let tried = format!(
                 "tried {} key(s) for {} · secret-tool: {secret_tool} · kwallet: {} · keyring: {keyring_state}\n  \
@@ -893,14 +1022,23 @@ pub fn capture_chromium(
                     .unwrap_or(0),
                 paths.kwallet_folders.join(", "),
             );
+            // An unreachable keyring needs different advice from a locked one:
+            // exporting a D-Bus variable cannot help when the socket lives in
+            // another namespace, so the keyring-free path is offered first.
+            if bus.is_none() && needs_keyring {
+                return Err(keyring_unreachable_error(paths.display));
+            }
             return Err(format!(
                 "no cookies could be decrypted for {} — {tried}\n  \
-                 help: make sure the browser is open at least once, and that its \
+                 help: make sure the browser has been opened at least once, and that its \
                  safe-storage key exists and is unlocked (GNOME: 'Passwords and Keys'; \
-                 KDE: 'KWallet' / the wallet must contain the entry)\n  \
-                 help: or import manually: install \"Get cookies.txt LOCALLY\" in the \
-                 browser → Export → Configuration → Cookie profiles → Import → From paste",
-                domains.join(", ")
+                 KDE: 'KWallet' — the entry must read '{}' inside the '{}' folder)\n  \
+                 help: or import manually, which needs no keyring at all: install \
+                 \"Get cookies.txt LOCALLY\" in the browser → Export → \
+                 Configuration → Cookie profiles → Import → From file",
+                domains.join(", "),
+                paths.kwallet_key,
+                paths.kwallet_folders.first().copied().unwrap_or("-"),
             ));
         }
 
@@ -1065,24 +1203,83 @@ mod tests {
         assert!(kwallet_candidate_passwords(&[], "Brave Safe Storage").is_empty());
     }
 
-    // ─── D-Bus diagnostics ──────────────────────────────────────────────────
+    // ─── D-Bus discovery ───────────────────────────────────────────────────
 
-    /// The D-Bus message must state that it is an environment problem and give
-    /// a copy-pasteable fix, because the generic "could not decrypt" wording
-    /// previously sent users looking for a browser misconfiguration instead.
+    /// The environment variable wins when it is set to a real address.
     #[test]
-    fn dbus_error_is_actionable_and_distinguishes_the_cause() {
-        let msg = dbus_missing_error("Brave Origin");
+    fn dbus_prefers_an_explicit_address() {
+        let addr = resolve_dbus_address_in(Some("unix:path=/tmp/custom-bus"), None, None);
+        assert_eq!(addr.as_deref(), Some("unix:path=/tmp/custom-bus"));
+    }
+
+    /// libdbus already discovers the bus without the variable, so a missing
+    /// variable must not be treated as "no keyring". This is the bug that made
+    /// the tool report a working keyring as broken.
+    #[test]
+    fn dbus_discovery_does_not_require_the_env_var() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(dir.path().join("bus"), b"").expect("write socket placeholder");
+        let runtime = dir.path().to_string_lossy().into_owned();
+        let addr = resolve_dbus_address_in(None, Some(&runtime), None);
+        assert_eq!(
+            addr,
+            Some(format!("unix:path={runtime}/bus")),
+            "the bus must be discovered from XDG_RUNTIME_DIR without the env var"
+        );
+    }
+
+    #[test]
+    fn dbus_ignores_empty_and_autolaunch_addresses() {
+        assert_eq!(resolve_dbus_address_in(Some(""), None, None), None);
+        assert_eq!(resolve_dbus_address_in(Some("   "), None, None), None);
+        assert_eq!(
+            resolve_dbus_address_in(Some("autolaunch:0123456789abcdef"), None, None),
+            None,
+            "an autolaunch address is not a real socket"
+        );
+    }
+
+    #[test]
+    fn dbus_is_none_when_no_socket_exists_anywhere() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let runtime = dir.path().to_string_lossy().into_owned();
+        // No bus file in the runtime dir, and no uid to fall back to.
+        assert_eq!(resolve_dbus_address_in(None, Some(&runtime), None), None);
+    }
+
+    #[test]
+    fn current_uid_is_readable_on_linux() {
+        if cfg!(target_os = "linux") {
+            assert!(current_uid().is_some(), "uid must be readable from /proc");
+        }
+    }
+
+    /// The unreachable-keyring message must lead with the path that actually
+    /// works — importing — because exporting a D-Bus variable cannot help when
+    /// the socket is in another namespace.
+    #[test]
+    fn keyring_error_offers_the_keyring_free_path_first() {
+        let msg = keyring_unreachable_error("Brave Origin");
+        let import_at = msg.find("Import").expect("must mention Import");
+        let export_at = msg
+            .find("DBUS_SESSION_BUS_ADDRESS")
+            .expect("must mention the variable");
+        assert!(
+            import_at < export_at,
+            "the keyring-free path must come first: {msg}"
+        );
         assert!(msg.contains("Brave Origin"));
-        assert!(msg.contains("DBUS_SESSION_BUS_ADDRESS"));
-        assert!(msg.contains("/run/user/$(id -u)/bus"));
         assert!(msg.contains("not a scrapmf bug"));
     }
 
     #[test]
-    fn dbus_available_matches_environment() {
-        let expected = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some_and(|v| !v.is_empty());
-        assert_eq!(dbus_available(), expected);
+    fn namespace_and_dbus_state_agree_on_this_host() {
+        // Discovery and the namespace probe must not contradict each other: a
+        // visible socket means the keyring is not outside the namespace.
+        if std::path::Path::new(&format!("/run/user/{}/bus", current_uid().unwrap_or(0))).exists() {
+            assert!(!keyring_outside_namespace());
+            assert!(resolve_dbus_address().is_some());
+        }
     }
 
     /// The empty-password candidate must be present so records written during
