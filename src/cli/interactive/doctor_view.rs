@@ -43,6 +43,7 @@ pub(crate) fn show() {
                     let style = match l.level {
                         Level::Success => Style::default().fg(Color::Green),
                         Level::Info => Style::default().fg(Color::DarkGray),
+                        Level::Warn => Style::default().fg(Color::Yellow),
                         Level::Error => Style::default().fg(Color::Red),
                         Level::Help => Style::default()
                             .fg(Color::Yellow)
@@ -51,6 +52,7 @@ pub(crate) fn show() {
                     // Prefix to mirror CLI output style
                     let prefix = match l.level {
                         Level::Success => "✔ ",
+                        Level::Warn => "⚠ ",
                         Level::Error => "✖ ",
                         Level::Info => "ℹ ",
                         Level::Help => "  ",

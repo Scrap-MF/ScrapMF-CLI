@@ -381,10 +381,17 @@ fn sqlite_read_rows(
 ) -> Result<Vec<Vec<String>>, String> {
     let sql = format!("SELECT {columns_expr} FROM {table};");
 
-    // 1) sqlite3 CLI
+    // 1) sqlite3 CLI.
+    //
+    // `-nocolumn` is NOT a valid sqlite3 option — the flag does not exist and
+    // the CLI rejects it outright ("Error: unknown option: -nocolumn"). It was
+    // passed here for years, so this branch could never succeed and the reader
+    // silently depended on the python3 fallback; on a host without python3 the
+    // user got "no cookies could be decrypted", blaming their cookies instead
+    // of the missing tool. `-noheader` alone is the correct way to emit bare
+    // rows.
     if let Ok(out) = std::process::Command::new("sqlite3")
         .arg("-noheader")
-        .arg("-nocolumn")
         .arg("-separator")
         .arg("\t")
         .arg(db_copy)
@@ -420,8 +427,10 @@ c = sqlite3.connect(sys.argv[1])\n\
     }
 
     Err(
-        "neither 'sqlite3' nor 'python3' is available to read the cookies \
-         database — install either one and retry"
+        "cannot read the cookies database: neither 'sqlite3' nor 'python3' is available\n  \
+         help: install one of them, e.g. 'pacman -S sqlite' (Arch), 'apt install sqlite3' \
+         (Debian/Ubuntu), 'dnf install sqlite' (Fedora)\n  \
+         note: this is a missing tool, not a decryption problem — the cookies on disk are fine"
             .to_string(),
     )
 }
@@ -435,95 +444,106 @@ fn tsv_to_rows(text: &str) -> Vec<Vec<String>> {
 
 // ─── Chromium-family capture (Brave/Chrome/Chromium/Edge/Vivaldi/Opera) ─────
 
+/// Everything needed to read and decrypt a Chromium-family cookie DB.
 struct ChromiumPaths {
     cookies_db: PathBuf,
-    /// Keyring service name (also used as the keyring item's user attribute).
-    service: String,
+    /// Secret Service `application` attribute candidates, most likely first.
+    secret_apps: &'static [&'static str],
+    /// KWallet folders to probe, most likely first.
+    kwallet_folders: &'static [&'static str],
+    /// KWallet entry holding the safe-storage key.
+    kwallet_key: &'static str,
+    /// Profile the DB came from (`Default`, `Profile 2`, …).
+    profile: String,
+    /// Packaging that supplied it: `native`, `flatpak`, `snap`.
+    origin: &'static str,
+    /// Channel display name, for diagnostics.
+    display: &'static str,
 }
 
+/// Resolve a browser label ("Brave", "Brave Origin", "Chrome", …) to its cookie
+/// database. Delegates path resolution to [`crate::browsers`] so the capture
+/// path and `--cookies-from-browser` detection can never drift again.
 fn chromium_paths(browser: &str) -> Option<ChromiumPaths> {
-    let (base, service) = match browser.to_lowercase().as_str() {
-        "brave" => ("BraveSoftware/Brave-Browser", "brave"),
-        "chrome" | "google-chrome" => ("google-chrome", "chrome"),
-        "chromium" => ("chromium", "chromium"),
-        "edge" | "microsoft-edge" => ("microsoft-edge", "microsoft-edge"),
-        "vivaldi" => ("vivaldi", "vivaldi-stable"),
-        "opera" => ("opera", "opera"),
-        _ => return None,
-    };
-    let home = dirs::home_dir()?;
-    let candidates = [
-        home.join(".config")
-            .join(base)
-            .join("Default")
-            .join("Cookies"),
-        home.join(".var/app/com.brave.Browser/config")
-            .join(base)
-            .join("Default")
-            .join("Cookies"),
-        home.join(".var/app/com.google.Chrome/config")
-            .join(base)
-            .join("Default")
-            .join("Cookies"),
-        home.join("snap/brave/common/.config")
-            .join(base)
-            .join("Default")
-            .join("Cookies"),
-        home.join("snap/chromium/common/chromium")
-            .join("Default")
-            .join("Cookies"),
-    ];
-    let cookies_db = candidates
-        .iter()
-        .find(|p| p.is_file())
-        .cloned()
-        .unwrap_or_else(|| {
-            home.join(".config")
-                .join(base)
-                .join("Default")
-                .join("Cookies")
-        });
+    let ch = crate::browsers::resolve_channel(browser)?;
+    let db = crate::browsers::find_cookie_db(ch, "Cookies")?;
     Some(ChromiumPaths {
-        cookies_db,
-        service: service.to_string(),
+        cookies_db: db.path,
+        secret_apps: ch.secret_apps,
+        kwallet_folders: ch.kwallet_folders,
+        kwallet_key: ch.kwallet_key,
+        profile: db.profile,
+        origin: db.origin,
+        display: ch.display,
     })
 }
 
-/// Try to read a password from KWallet (KDE) — `kwallet-query` if available.
-/// Brave/Chromium store "Brave Safe Storage" / "Chromium Safe Storage" in
-/// folder "Chromium Keys" in wallet "kdewallet".
-fn kwallet_candidate_passwords(service: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    if which::which("kwallet-query").is_err() {
+/// True when a D-Bus session bus is reachable from this process.
+///
+/// Every OS keyring backend on Linux (libsecret/gnome-keyring, KWallet 5, KWallet
+/// 6) is a D-Bus *client*. Without `DBUS_SESSION_BUS_ADDRESS` none of them can
+/// be queried, so a `v11` cookie DB becomes undecryptable and the only
+/// recoverable advice is to fix the environment — not to retry the browser.
+fn dbus_available() -> bool {
+    std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some_and(|v| !v.is_empty())
+}
+
+/// Actionable message shown when decryption is impossible because D-Bus is
+/// missing. The three failure modes (no D-Bus, no wallet, locked wallet) need
+/// different fixes, so they must not be conflated.
+fn dbus_missing_error(display: &str) -> String {
+    format!(
+        "no D-Bus session in this terminal — the OS keyring is unreachable, so \
+         {display}'s encrypted cookies cannot be decrypted\n  \
+         help: export DBUS_SESSION_BUS_ADDRESS=\"unix:path=/run/user/$(id -u)/bus\"\n  \
+         note: this is an environment problem, not a scrapmf bug; libsecret and KWallet \
+         are both D-Bus clients and neither can be queried without it\n  \
+         note: run scrapmf from your desktop session, or use \
+         Configuration → Cookie profiles → Import → From paste"
+    )
+}
+
+/// KWallet client binaries, newest generation first. `kwallet-query` is the
+/// legacy KDE 4 tool and is absent on a modern Plasma 6 install, which ships
+/// `kwalletctl6`; the legacy name is kept last so old systems still work.
+const KWALLET_BINARIES: &[&str] = crate::browsers::KWALLET_CLIENTS;
+
+/// Probe KWallet for a channel's safe-storage password.
+///
+/// The KWallet folder is **per product** (`Brave Keys`, `Chrome Keys`,
+/// `Chromium Keys`, …), not shared. An earlier version hardcoded
+/// `"Chromium Keys"` for every browser, so on KDE a Brave install returned an
+/// empty string, the only surviving candidate was the legacy `"peanuts"`
+/// constant — which Chromium uses exclusively for `v10` — and every `v11`
+/// cookie failed to decrypt with "no cookies could be decrypted".
+///
+/// All (binary × folder) combinations are probed and deduplicated, so this
+/// works across KDE 5 and 6 without the caller having to know which generation
+/// is installed.
+fn kwallet_candidate_passwords(folders: &[&str], entry: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if entry.is_empty() || folders.is_empty() {
         return out;
     }
-    // Mapping service -> kwallet entry name
-    let entry = match service {
-        "brave" => "Brave Safe Storage",
-        "chrome" => "Chromium Safe Storage",
-        "chromium" => "Chromium Safe Storage",
-        "vivaldi" => "Vivaldi Safe Storage",
-        "opera" => "Opera Safe Storage",
-        _ => return out,
-    };
-    for args in [
-        vec!["kdewallet", "-f", "Chromium Keys", "-r", entry],
-        vec![
-            "kdewallet",
-            "--folder",
-            "Chromium Keys",
-            "--read-password",
-            entry,
-        ],
-    ] {
-        if let Ok(output) = std::process::Command::new("kwallet-query")
-            .args(&args)
-            .output()
-            && output.status.success()
-        {
-            let secret = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !secret.is_empty() {
-                out.push(secret);
+    for bin in KWALLET_BINARIES {
+        let Ok(bin_path) = which::which(bin) else {
+            continue;
+        };
+        for folder in folders {
+            for args in [
+                vec!["kdewallet", "-f", folder, "-r", entry],
+                vec!["kdewallet", "--folder", folder, "--read-password", entry],
+            ] {
+                let Ok(output) = std::process::Command::new(&bin_path).args(&args).output() else {
+                    continue;
+                };
+                if !output.status.success() {
+                    continue;
+                }
+                let secret = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !secret.is_empty() && !out.contains(&secret) {
+                    out.push(secret);
+                }
             }
         }
     }
@@ -531,44 +551,102 @@ fn kwallet_candidate_passwords(service: &str) -> Vec<String> {
 }
 
 /// Candidate passwords for the browser's cookie key, most likely first:
-/// Secret Service → KWallet (KDE) → legacy "peanuts".
-/// Secret Service entry (attribute application=<browser>) — schema v2 wraps
-/// it BASE64-ENCODED, so both decoded and raw forms are tried.
-fn chromium_candidate_passwords(service: &str) -> Vec<String> {
+/// Secret Service → KWallet → legacy "peanuts".
+///
+/// Secret Service lookup: Chromium registers the item with an `application`
+/// attribute (and an `xdg:schema`). Schema v2 stores the secret base64-encoded,
+/// so both the decoded and the raw form are tried. Which `application` value a
+/// channel uses varies by build (Brave Origin is de-branded and has used both
+/// `brave` and `brave-origin`), so every candidate is probed.
+/// Secret Service schema Chromium registers its safe-storage item under.
+const LIBRECRYPT_SCHEMA: &str = "chrome_libsecret_os_crypt_password_v2";
+
+fn chromium_candidate_passwords(
+    secret_apps: &[&str],
+    kwallet_folders: &[&str],
+    kwallet_key: &str,
+) -> Vec<String> {
     use base64::Engine;
-    let mut out = Vec::new();
-    if let Ok(output) = std::process::Command::new("secret-tool")
-        .args(["lookup", "application", service])
-        .output()
-        && output.status.success()
-    {
-        let secret = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !secret.is_empty() {
+    let mut out: Vec<String> = Vec::new();
+
+    for app in secret_apps {
+        // The schema-qualified lookup is the documented one; the bare lookup
+        // is kept as a fallback because older Chromium builds and some
+        // keyring daemons register the item without the schema attribute.
+        for args in [
+            vec![
+                "lookup",
+                "application",
+                app,
+                "xdg:schema",
+                LIBRECRYPT_SCHEMA,
+            ],
+            vec!["lookup", "application", app],
+        ] {
+            let Ok(output) = std::process::Command::new("secret-tool")
+                .args(&args)
+                .output()
+            else {
+                break;
+            };
+            if !output.status.success() {
+                continue;
+            }
+            let secret = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if secret.is_empty() {
+                continue;
+            }
+            // Schema v2 stores the secret base64-encoded, so both the decoded
+            // and the raw form are tried.
             if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(secret.as_bytes())
                 && let Ok(txt) = String::from_utf8(decoded)
+                && !out.contains(&txt)
             {
                 out.push(txt);
             }
-            out.push(secret);
+            if !out.contains(&secret) {
+                out.push(secret);
+            }
+            break;
         }
     }
-    // KWallet fallback (Arch + KDE, kwallet active by default even without GNOME)
-    for pw in kwallet_candidate_passwords(service) {
+
+    // KWallet fallback (KDE, where kwalletd is the keyring provider).
+    for pw in kwallet_candidate_passwords(kwallet_folders, kwallet_key) {
         if !out.contains(&pw) {
             out.push(pw);
         }
     }
-    out.push("peanuts".to_string());
+    // Legacy Chromium constant. Only ever used for `v10` blobs, but it is a
+    // cheap extra candidate when the browser fell back to a plaintext store.
+    if !out.iter().any(|p| p == "peanuts") {
+        out.push("peanuts".to_string());
+    }
     out
 }
 
 /// Derive candidate AES-128 keys: PBKDF2-SHA1(password, salt "saltysalt",
 /// 1 iteration, 16 bytes) — one key per distinct password candidate.
-fn chromium_candidate_keys(service: &str) -> Vec<[u8; 16]> {
-    let mut keys = Vec::new();
-    for pw in chromium_candidate_passwords(service) {
-        use pbkdf2::pbkdf2_hmac;
-        use sha1::Sha1;
+///
+/// The empty-string candidate is included because Chromium retries a failed
+/// `v10`/`v11` decryption with `kEmptyKey = PBKDF2("", "saltysalt", 1, 16)` to
+/// recover records written during a KWallet initialisation race
+/// (crbug.com/40055416). It is decrypt-only — Chromium never encrypts with it.
+fn chromium_candidate_keys(
+    secret_apps: &[&str],
+    kwallet_folders: &[&str],
+    kwallet_key: &str,
+) -> Vec<[u8; 16]> {
+    use pbkdf2::pbkdf2_hmac;
+    use sha1::Sha1;
+
+    let mut passwords = chromium_candidate_passwords(secret_apps, kwallet_folders, kwallet_key);
+    if !passwords.iter().any(|p| p.is_empty()) {
+        passwords.push(String::new());
+    }
+
+    let mut keys: Vec<[u8; 16]> = Vec::new();
+    for pw in &passwords {
         let mut key = [0u8; 16];
         pbkdf2_hmac::<Sha1>(pw.as_bytes(), b"saltysalt", 1, &mut key);
         if !keys.contains(&key) {
@@ -606,9 +684,23 @@ fn decrypt_chromium_blob(blob: &[u8], key: &[u8; 16]) -> Option<String> {
         prev.copy_from_slice(chunk);
     }
 
-    // Strip PKCS7 padding.
+    // Strip and *verify* PKCS#7 padding.
+    //
+    // The previous code only checked the LENGTH implied by the last byte and
+    // never compared the padding bytes themselves. A wrong key therefore
+    // "validated" with probability 16/255 ≈ 6.3% instead of the true ~1/256,
+    // and since `capture_chromium` picks the first candidate key that
+    // decrypts *anything*, a wrong key could be accepted and its garbage
+    // written into the user's credential profile. Comparing every padding
+    // byte makes a false accept ~400x less likely.
     let pad = *plain.last()? as usize;
     if pad == 0 || pad > 16 || pad > plain.len() {
+        return None;
+    }
+    if plain[plain.len() - pad..]
+        .iter()
+        .any(|b| *b as usize != pad)
+    {
         return None;
     }
     let stripped = &plain[..plain.len() - pad];
@@ -650,11 +742,17 @@ pub fn capture_chromium(
         chromium_paths(browser).ok_or_else(|| format!("unsupported browser '{browser}'"))?;
     if !paths.cookies_db.is_file() {
         return Err(format!(
-            "cookies database not found at {}",
+            "cookies database not found for {} at {}",
+            paths.display,
             paths.cookies_db.display()
         ));
     }
-    let candidate_keys = chromium_candidate_keys(&paths.service);
+    // A v11 cookie DB is only decryptable through the OS keyring, and every
+    // keyring backend on Linux is a D-Bus client. Whether the DB actually needs
+    // the keyring is determined below, once the rows are read, so a v10/plain
+    // database keeps working on a machine with no D-Bus.
+    let candidate_keys =
+        chromium_candidate_keys(paths.secret_apps, paths.kwallet_folders, paths.kwallet_key);
 
     let tmp = std::env::temp_dir().join(format!(
         "scrapmf-cookies-{}-{}.sqlite",
@@ -713,6 +811,19 @@ pub fn capture_chromium(
             });
         }
 
+        // `v11` blobs are keyring-encrypted, so with no D-Bus session no
+        // candidate key can ever work. Say so now, instead of letting the user
+        // read a generic "could not decrypt" and start guessing.
+        let needs_keyring = first_blob
+            .as_ref()
+            .is_some_and(|b| b.starts_with(b"v11") || b.starts_with(b"v12"));
+        if needs_keyring && !dbus_available() {
+            return Err(dbus_missing_error(paths.display));
+        }
+        if needs_keyring && candidate_keys.is_empty() {
+            tracing::warn!("no keyring candidate available; decryption cannot succeed");
+        }
+
         // Pick the candidate key whose PKCS7 padding validates on the first
         // encrypted cookie (keyring schema v1/v2/legacy derive different keys).
         let working_key: Option<[u8; 16]> = first_blob.as_ref().and_then(|blob| {
@@ -737,26 +848,58 @@ pub fn capture_chromium(
         }
 
         if cookies.is_empty() {
+            let kwallet_bins: Vec<&str> = KWALLET_BINARIES
+                .iter()
+                .copied()
+                .filter(|b| which::which(b).is_ok())
+                .collect();
+            let secret_tool = if which::which("secret-tool").is_ok() {
+                "found"
+            } else {
+                "not-found"
+            };
+            // Distinguish the three causes: the *tools* may all be installed and
+            // still be unable to answer, because the keyring may be locked, may
+            // not exist yet, or may be unreachable. An earlier version printed
+            // "pacman -S libsecret" unconditionally, which was wrong advice for
+            // a KDE user whose problem was a locked or absent KWallet folder.
+            let keyring_state = if !dbus_available() {
+                "no D-Bus session — keyring unreachable"
+            } else if candidate_keys.is_empty() {
+                "no safe-storage key found (wallet locked, or the entry has never been created — open the browser once)"
+            } else {
+                "keys found, but none decrypted the cookies"
+            };
             let tried = format!(
-                "tried {} key(s) (secret-tool:{}, kwallet-query:{}, peanuts:yes), Cookies at {} ({} bytes)",
+                "tried {} key(s) for {} · secret-tool: {secret_tool} · kwallet: {} · keyring: {keyring_state}\n  \
+                 db: {} (profile {}, {}-packed, {} bytes)\n  \
+                 note: the KWallet folder is per product — looked in {}",
                 candidate_keys.len(),
-                if which::which("secret-tool").is_ok() {
-                    "found"
+                paths.display,
+                if kwallet_bins.is_empty() {
+                    "no client found (install kwallet / libsecret)".to_string()
                 } else {
-                    "not-found"
-                },
-                if which::which("kwallet-query").is_ok() {
-                    "found"
-                } else {
-                    "not-found"
+                    kwallet_bins.join(", ")
                 },
                 paths.cookies_db.display(),
+                if paths.profile.is_empty() {
+                    "-"
+                } else {
+                    &paths.profile
+                },
+                paths.origin,
                 std::fs::metadata(&paths.cookies_db)
                     .map(|m| m.len())
-                    .unwrap_or(0)
+                    .unwrap_or(0),
+                paths.kwallet_folders.join(", "),
             );
             return Err(format!(
-                "no cookies could be decrypted for {} — {tried}\n  help: Arch pacman + kwallet por defecto → unlock KWallet at login or install libsecret (secret-tool), or capture from Firefox (no decryption): Configuration → Cookie profiles → Create → Firefox\n  help: or manual import: Install \"Get cookies.txt LOCALLY\" in {browser} → Export → Configuration → Cookie profiles → Import → From paste",
+                "no cookies could be decrypted for {} — {tried}\n  \
+                 help: make sure the browser is open at least once, and that its \
+                 safe-storage key exists and is unlocked (GNOME: 'Passwords and Keys'; \
+                 KDE: 'KWallet' / the wallet must contain the entry)\n  \
+                 help: or import manually: install \"Get cookies.txt LOCALLY\" in the \
+                 browser → Export → Configuration → Cookie profiles → Import → From paste",
                 domains.join(", ")
             ));
         }
@@ -885,5 +1028,146 @@ mod tests {
         assert_eq!(domains_for_site("tiktok"), &["tiktok.com"]);
         assert_eq!(domains_for_site("x"), &["twitter.com", "x.com"]);
         assert!(domains_for_site("nope").is_empty());
+    }
+
+    // ─── Browser channel resolution ─────────────────────────────────────────
+
+    #[test]
+    fn chromium_paths_rejects_unknown_browser() {
+        assert!(chromium_paths("netscape").is_none());
+        assert!(chromium_paths("").is_none());
+    }
+
+    /// Labels come straight from the wizard, which uses the display name
+    /// ("Brave Origin"), while the config and cookie profiles use the id
+    /// ("brave-origin"). Both must resolve to the same channel.
+    #[test]
+    fn chromium_paths_accepts_display_names_and_ids() {
+        for label in [
+            "Brave Origin",
+            "brave-origin",
+            "BRAVEORIGIN",
+            "brave origin",
+        ] {
+            // Resolution succeeds or fails only because no such profile exists
+            // on this machine; what matters is that the label is understood
+            // rather than rejected as an unknown browser.
+            let recognised = crate::browsers::resolve_channel(label).is_some();
+            assert!(recognised, "channel label {label:?} was not recognised");
+        }
+    }
+
+    #[test]
+    fn kwallet_lookup_is_a_noop_without_an_entry() {
+        // No entry name means there is nothing to ask for; must not spawn any
+        // process and must not invent candidates.
+        assert!(kwallet_candidate_passwords(&["Brave Keys"], "").is_empty());
+        assert!(kwallet_candidate_passwords(&[], "Brave Safe Storage").is_empty());
+    }
+
+    // ─── D-Bus diagnostics ──────────────────────────────────────────────────
+
+    /// The D-Bus message must state that it is an environment problem and give
+    /// a copy-pasteable fix, because the generic "could not decrypt" wording
+    /// previously sent users looking for a browser misconfiguration instead.
+    #[test]
+    fn dbus_error_is_actionable_and_distinguishes_the_cause() {
+        let msg = dbus_missing_error("Brave Origin");
+        assert!(msg.contains("Brave Origin"));
+        assert!(msg.contains("DBUS_SESSION_BUS_ADDRESS"));
+        assert!(msg.contains("/run/user/$(id -u)/bus"));
+        assert!(msg.contains("not a scrapmf bug"));
+    }
+
+    #[test]
+    fn dbus_available_matches_environment() {
+        let expected = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some_and(|v| !v.is_empty());
+        assert_eq!(dbus_available(), expected);
+    }
+
+    /// The empty-password candidate must be present so records written during
+    /// the KWallet initialisation race (crbug.com/40055416) stay readable.
+    #[test]
+    fn empty_key_candidate_is_always_available() {
+        // Use a channel name that does not exist so no keyring process is
+        // consulted; the only candidates are the legacy constant and the
+        // decrypt-only empty key.
+        let keys = chromium_candidate_keys(&["scrapmf-nonexistent-app"], &[], "");
+        assert!(
+            keys.len() >= 2,
+            "expected the legacy and empty-key candidates, got {}",
+            keys.len()
+        );
+    }
+
+    // ─── PKCS#7 padding validation ─────────────────────────────────────────
+
+    /// Craft a blob whose last byte advertises padding length N while the
+    /// actual padding bytes disagree. The old code accepted this, letting a
+    /// wrong key win the candidate race and write garbage into the user's
+    /// credential profile.
+    #[test]
+    fn decrypt_rejects_inconsistent_pkcs7_padding() {
+        let key = [0x2a_u8; 16];
+        let mut blob = encrypt_v10(b"a-real-value", &key);
+        let len = blob.len();
+        // Corrupt the two padding bytes before the last one so the declared
+        // length no longer matches the padding content.
+        blob[len - 2] ^= 0xff;
+        assert_eq!(
+            decrypt_chromium_blob(&blob, &key),
+            None,
+            "inconsistent PKCS#7 padding must be rejected"
+        );
+    }
+
+    #[test]
+    fn decrypt_still_accepts_valid_padding() {
+        let key = [0x2a_u8; 16];
+        for plain in ["x", "sessionid=ABC123; secure"] {
+            let blob = encrypt_v10(plain.as_bytes(), &key);
+            assert_eq!(decrypt_chromium_blob(&blob, &key).as_deref(), Some(plain));
+        }
+    }
+
+    #[test]
+    fn decrypt_rejects_out_of_range_padding_length() {
+        let key = [0x2a_u8; 16];
+        let mut blob = encrypt_v10(b"value", &key);
+        let len = blob.len();
+        // A last byte of 0x00 (invalid) and one above the block size must both
+        // be refused before any slicing happens.
+        blob[len - 1] = 0x00;
+        assert_eq!(decrypt_chromium_blob(&blob, &key), None);
+        let mut blob2 = encrypt_v10(b"value", &key);
+        let l2 = blob2.len();
+        blob2[l2 - 1] = 0xff;
+        assert_eq!(decrypt_chromium_blob(&blob2, &key), None);
+    }
+
+    // ─── SQLite reader ─────────────────────────────────────────────────────
+
+    /// The reader used to pass `-nocolumn`, which sqlite3 rejects outright, so
+    /// the CLI branch could never succeed and the reader silently depended on
+    /// the python3 fallback. The error text also blamed decryption instead of
+    /// the missing tool.
+    #[test]
+    fn missing_reader_error_blames_the_tool_not_the_cookies() {
+        let err = match sqlite_read_rows(Path::new("/nonexistent"), "host_key", "cookies") {
+            Err(e) => e,
+            // A host that happens to ship both tools can read the query, which
+            // is a success for this purpose.
+            Ok(_) => return,
+        };
+        assert!(
+            err.contains("sqlite3") && err.contains("python3"),
+            "error must name both readers: {err}"
+        );
+        if err.contains("cannot read the cookies database") {
+            assert!(
+                err.contains("missing tool"),
+                "error must say the tool is missing, not the cookies: {err}"
+            );
+        }
     }
 }

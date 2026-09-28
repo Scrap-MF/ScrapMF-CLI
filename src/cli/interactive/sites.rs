@@ -213,20 +213,38 @@ fn general_settings_menu() {
 
 /// Manage named cookie profiles: capture from Firefox, import pasted
 /// Netscape text, list with live summaries, delete.
+/// Browser labels offered by the capture wizard, most relevant first.
+///
+/// Only channels that are actually installed *or* have a cookie database on
+/// this machine are listed, so a Brave Origin user is offered "Brave Origin"
+/// instead of a list dominated by browsers they do not use. The previous
+/// version hardcoded seven labels and omitted every Brave channel except
+/// stable, which is why an Origin user could only ever be pointed at the
+/// abandoned `Brave-Browser` profile.
+fn capture_browser_options() -> Vec<String> {
+    let present: Vec<&crate::browsers::BrowserChannel> = crate::browsers::CHANNELS
+        .iter()
+        .filter(|c| {
+            crate::browsers::binary_for(c).is_some()
+                || crate::browsers::find_cookie_db(c, "Cookies").is_some()
+                || crate::browsers::find_cookie_db(c, "cookies.sqlite").is_some()
+        })
+        .collect();
+    if present.is_empty() {
+        return crate::browsers::CHANNELS
+            .iter()
+            .map(|c| c.display.to_string())
+            .collect();
+    }
+    present.iter().map(|c| c.display.to_string()).collect()
+}
+
 /// Wizard: pick browser + networks, capture their session cookies into a
 /// new named profile. Firefox uses direct SQLite reads; Chromium-family
 /// browsers (Brave/Chrome/…) use keyring-based decryption.
 fn create_profile_wizard() {
     use crate::config::cookies;
-    let browsers: Vec<String> = vec![
-        "Brave".into(),
-        "Firefox".into(),
-        "Chrome".into(),
-        "Chromium".into(),
-        "Edge".into(),
-        "Vivaldi".into(),
-        "Opera".into(),
-    ];
+    let browsers = capture_browser_options();
     let Some(b_idx) = crate::cli::interactive::menu::pick_single(
         "Configuration ─ Cookie capture ─ Browser",
         browsers
@@ -240,7 +258,15 @@ fn create_profile_wizard() {
 
     // Network multi-select with an "All" shortcut. Plugin-backed networks
     // (threads) only appear while their plugin is enabled.
-    let mut networks: Vec<&str> = vec!["instagram", "tiktok", "twitter", "vsco"];
+    let mut networks: Vec<&str> = vec![
+        "instagram",
+        "tiktok",
+        "twitter",
+        "vsco",
+        // Facebook was missing here even though `domains_for_site` supports it,
+        // so its cookies were unreachable from the wizard.
+        "facebook",
+    ];
     if crate::plugins::threads_enabled() {
         networks.push("threads");
     }

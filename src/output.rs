@@ -23,6 +23,15 @@ pub fn print_info(msg: &str) {
     anstream::println!("{msg}");
 }
 
+/// Warning: a check that did not fail outright but needs attention (e.g. a
+/// missing D-Bus session, which blocks cookie decryption without aborting).
+pub fn print_warn(msg: &str) {
+    let style = Style::new()
+        .fg_color(Some(Color::Ansi(AnsiColor::Yellow)))
+        .bold();
+    anstream::println!("{}warning:{} {msg}", style.render(), Style::new().render());
+}
+
 pub fn print_help(msg: &str) {
     let style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Cyan)));
     anstream::println!("{}{}{}", style.render(), msg, Style::new().render());

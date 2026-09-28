@@ -1,4 +1,5 @@
 pub mod application;
+pub mod browsers;
 pub mod cli;
 pub mod commands;
 pub mod config;

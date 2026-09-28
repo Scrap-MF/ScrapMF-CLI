@@ -9,6 +9,7 @@ use crate::providers::{Provider, browser::detect_available_browsers};
 pub enum Level {
     Success,
     Info,
+    Warn,
     Error,
     Help,
 }
@@ -109,7 +110,14 @@ pub fn collect(verbose: u8) -> (Vec<CheckLine>, bool) {
     if available.is_empty() {
         out.push(CheckLine {
             level: Level::Info,
-            text: "No browser cookie DBs detected (checked: firefox, brave, chrome, chromium, edge, opera, vivaldi)".to_string(),
+            text: format!(
+                "No browser cookie DBs detected (checked: {})",
+                crate::browsers::CHANNELS
+                    .iter()
+                    .map(|c| c.id)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         });
         for b in &browsers {
             tracing::debug!(browser = %b.id, display = %b.display, "browser check");
@@ -127,10 +135,18 @@ pub fn collect(verbose: u8) -> (Vec<CheckLine>, bool) {
         }
     }
 
-    // Keyring diagnostics — Arch pacman + kwallet por defecto, engloba futuros keyring/cifrados
+    // Keyring diagnostics. Distribution-agnostic on purpose: the previous
+    // wording hardcoded Arch pacman commands, which is wrong advice for a KDE
+    // user whose actual problem was a locked or absent KWallet.
     {
         let has_secret_tool = which::which("secret-tool").is_ok();
-        let has_kwallet = which::which("kwallet-query").is_ok();
+        // `kwallet-query` is the legacy KDE 4 client; a modern Plasma 6 install
+        // ships `kwalletctl6` and no legacy binary at all.
+        let kwallet_clients: Vec<&str> = crate::browsers::kwallet_clients()
+            .iter()
+            .copied()
+            .filter(|b| which::which(b).is_ok())
+            .collect();
         out.push(CheckLine {
             level: if has_secret_tool {
                 Level::Success
@@ -138,53 +154,44 @@ pub fn collect(verbose: u8) -> (Vec<CheckLine>, bool) {
                 Level::Info
             },
             text: format!(
-                "secret-tool (libsecret): {}",
+                "secret-tool (libsecret/GNOME): {}",
                 if has_secret_tool {
                     "found"
                 } else {
-                    "not found — pacman -S libsecret"
+                    "not found (optional — needed for GNOME/libsecret keyrings)"
                 }
             ),
         });
         out.push(CheckLine {
-            level: if has_kwallet {
-                Level::Success
-            } else {
+            level: if kwallet_clients.is_empty() {
                 Level::Info
+            } else {
+                Level::Success
             },
-            text: format!(
-                "kwallet-query (KDE): {}",
-                if has_kwallet {
-                    "found — KWallet active"
-                } else {
-                    "not found — optional, for KDE kwallet"
-                }
-            ),
+            text: if kwallet_clients.is_empty() {
+                "kwallet (KDE): no client found (optional — install kwallet if the browser uses it)"
+                    .to_string()
+            } else {
+                format!("kwallet (KDE): {}", kwallet_clients.join(", "))
+            },
         });
-        if let Some(home) = dirs::home_dir() {
-            let brave_path = home.join(".config/BraveSoftware/Brave-Browser/Default/Cookies");
-            let brave_flatpak = home.join(
-                ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser/Default/Cookies",
-            );
-            let found = brave_path.is_file() || brave_flatpak.is_file();
-            let size = std::fs::metadata(&brave_path)
-                .or_else(|_| std::fs::metadata(&brave_flatpak))
-                .map(|m| m.len())
-                .unwrap_or(0);
-            out.push(CheckLine {
-                level: if found { Level::Success } else { Level::Info },
-                text: format!(
-                    "Brave Cookies DB: {} ({} bytes){}",
-                    if found { "found" } else { "not found" },
-                    size,
-                    if found {
-                        ""
-                    } else {
-                        " — pacman: ~/.config/BraveSoftware/..., flatpak: ~/.var/app/..."
-                    }
-                ),
-            });
-        }
+        // A v11 cookie DB cannot be decrypted without a D-Bus session. This is
+        // the single most common cause of "no cookies could be decrypted" on a
+        // KDE setup, because the wallet tools are installed but the shell that
+        // launches scrapmf has no session bus.
+        let dbus = std::env::var_os("DBUS_SESSION_BUS_ADDRESS")
+            .filter(|v| !v.is_empty())
+            .is_some();
+        out.push(CheckLine {
+            level: if dbus { Level::Success } else { Level::Warn },
+            text: if dbus {
+                "D-Bus session: available — keyring reachable".to_string()
+            } else {
+                "D-Bus session: MISSING — browser cookies cannot be decrypted\n    \
+                 help: export DBUS_SESSION_BUS_ADDRESS=\"unix:path=/run/user/$(id -u)/bus\""
+                    .to_string()
+            },
+        });
     }
 
     // Check resolved backend binary is reachable
@@ -277,6 +284,7 @@ pub fn run(verbose: u8) -> Result<()> {
         match line.level {
             Level::Success => output::print_success(&line.text),
             Level::Info => output::print_info(&line.text),
+            Level::Warn => output::print_warn(&line.text),
             Level::Error => output::print_error(&line.text),
             Level::Help => output::print_help(&line.text),
         }
