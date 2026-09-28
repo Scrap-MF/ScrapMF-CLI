@@ -763,9 +763,41 @@ fn chromium_candidate_keys(
     keys
 }
 
-/// Decrypt a v10/v11 blob: AES-128-CBC with IV of 16 spaces; v11 strips a
-/// leading 32-byte SHA256(domain-without-leading-dot) hash after decryption.
-fn decrypt_chromium_blob(blob: &[u8], key: &[u8; 16]) -> Option<String> {
+/// Strip Chromium's `SHA-256(host_key)` domain-binding prefix.
+///
+/// Cookie-database schema 24 (2024-08-15) prepends the raw 32-byte digest of
+/// the cookie's domain to the plaintext before encrypting, and verifies it on
+/// load. The presence of that prefix is governed by the *schema version*, not
+/// by the `v10`/`v11` prefix, so deciding from the prefix alone is wrong in both
+/// directions: a `v10` blob on a v24 database keeps the hash and fails to parse,
+/// and a `v11` blob from an older database has 32 bytes of real value truncated.
+///
+/// Deciding by content instead is both simpler and safer: strip only when the
+/// first 32 bytes really are the digest of this cookie's domain. That keeps
+/// legitimate values of 32 bytes or more intact, and surfaces a value moved
+/// between domains rather than silently accepting it.
+fn strip_domain_hash<'a>(plaintext: &'a [u8], host_key: &str) -> &'a [u8] {
+    use sha2::{Digest, Sha256};
+    const DOMAIN_HASH_LEN: usize = 32;
+    if plaintext.len() < DOMAIN_HASH_LEN {
+        return plaintext;
+    }
+    let expected = Sha256::digest(host_key.as_bytes());
+    if plaintext[..DOMAIN_HASH_LEN] == expected[..] {
+        &plaintext[DOMAIN_HASH_LEN..]
+    } else {
+        plaintext
+    }
+}
+
+/// Decrypt a v10/v11 blob: AES-128-CBC with an IV of 16 spaces, PKCS#7 padding
+/// verified byte by byte, and Chromium's domain-binding prefix removed when the
+/// plaintext really carries it.
+///
+/// `host_key` is the cookie's domain as stored in the database (`host_key`
+/// column verbatim, leading dot included) and is only used to verify the
+/// optional 32-byte prefix, so a wrong caller can never truncate a value.
+fn decrypt_chromium_blob(blob: &[u8], key: &[u8; 16], host_key: &str) -> Option<String> {
     use aes::Aes128;
     use aes::cipher::{Array, BlockCipherDecrypt, KeyInit};
 
@@ -810,13 +842,9 @@ fn decrypt_chromium_blob(blob: &[u8], key: &[u8; 16]) -> Option<String> {
     {
         return None;
     }
-    let stripped = &plain[..plain.len() - pad];
-
-    // v11 prepends SHA256(domain) — drop those 32 bytes.
-    let stripped: &[u8] = match version {
-        b"v11" => stripped.get(32..)?,
-        _ => stripped,
-    };
+    // Chromium schema 24+ prepends SHA256(host_key) to the plaintext. Verified
+    // against the real domain rather than assumed from the v10/v11 prefix.
+    let stripped = strip_domain_hash(&plain[..plain.len() - pad], host_key);
     String::from_utf8(stripped.to_vec()).ok()
 }
 
@@ -875,6 +903,20 @@ pub fn capture_chromium(
             "host_key,name,hex(COALESCE(encrypted_value,'')),value,path,expires_utc,is_secure,is_httponly",
             "cookies",
         )?;
+
+        // Cookie-database schema version. 24 (2024-08-15) introduced the
+        // domain-binding hash, so reporting it turns "none decrypted" from a
+        // guess into a diagnosis. Read defensively: the table is absent in
+        // Firefox-shaped databases and a missing row is not an error.
+        let meta_version: Option<i64> =
+            sqlite_read_rows(&tmp, "value", "meta")
+                .ok()
+                .and_then(|meta| {
+                    meta.iter()
+                        .find(|r| r.len() == 1)
+                        .and_then(|r| r[0].parse::<i64>().ok())
+                });
+        let has_domain_hash = meta_version.is_some_and(|v| v >= 24);
 
         let mut filtered: Vec<StoredCookie> = Vec::new();
         let mut first_blob: Option<Vec<u8>> = None;
@@ -935,23 +977,32 @@ pub fn capture_chromium(
             );
         }
 
-        // Pick the candidate key whose PKCS7 padding validates on the first
-        // encrypted cookie (keyring schema v1/v2/legacy derive different keys).
-        let working_key: Option<[u8; 16]> = first_blob.as_ref().and_then(|blob| {
-            candidate_keys
+        // Pick the candidate key by decrypting the first encrypted cookie.
+        // Keyring schema v1/v2/legacy derive different keys from the same
+        // entry, so the winner is decided by trial rather than assumption.
+        let first_host: Option<String> = filtered
+            .iter()
+            .find(|c| !c.encrypted_value.is_empty())
+            .map(|c| c.domain.clone());
+        let working_key: Option<[u8; 16]> = match (&first_blob, &first_host) {
+            (Some(blob), Some(host)) => candidate_keys
                 .iter()
-                .find(|k| decrypt_chromium_blob(blob, k).is_some())
-                .copied()
-        });
+                .find(|k| decrypt_chromium_blob(blob, k, host).is_some())
+                .copied(),
+            _ => None,
+        };
 
         let mut cookies = Vec::new();
         for mut cookie in filtered {
             if cookie.value.is_empty() && !cookie.encrypted_value.is_empty() {
                 match working_key
                     .as_ref()
-                    .and_then(|k| decrypt_chromium_blob(&cookie.encrypted_value, k))
+                    .and_then(|k| decrypt_chromium_blob(&cookie.encrypted_value, k, &cookie.domain))
                 {
                     Some(v) => cookie.value = v,
+                    // A cookie that fails with the winning key is skipped
+                    // rather than aborting the capture: one malformed row must
+                    // not cost the user every other cookie for that site.
                     None => continue,
                 }
             }
@@ -1001,7 +1052,7 @@ pub fn capture_chromium(
             };
             let tried = format!(
                 "tried {} key(s) for {} · secret-tool: {secret_tool} · kwallet: {} · keyring: {keyring_state}\n  \
-                 db: {} (profile {}, {}-packed, {} bytes)\n  \
+                 db: {} (profile {}, {}-packed, {}, cookie schema v{})\n  \
                  note: the KWallet folder is per product — looked in {}",
                 candidate_keys.len(),
                 paths.display,
@@ -1020,8 +1071,19 @@ pub fn capture_chromium(
                 std::fs::metadata(&paths.cookies_db)
                     .map(|m| m.len())
                     .unwrap_or(0),
+                meta_version.map_or("unknown".to_string(), |v| v.to_string()),
                 paths.kwallet_folders.join(", "),
             );
+            // Schema 24+ binds each value to its domain, so when the keys exist
+            // but nothing decrypts, the keyring entry is the thing to check —
+            // saying so is more useful than restating that decryption failed.
+            if has_domain_hash && candidate_keys.len() > 1 {
+                tracing::debug!(
+                    meta_version,
+                    keys = candidate_keys.len(),
+                    "schema 24+ domain-bound cookies present; expected the keyring entry"
+                );
+            }
             // An unreachable keyring needs different advice from a locked one:
             // exporting a D-Bus variable cannot help when the socket lives in
             // another namespace, so the keyring-free path is offered first.
@@ -1130,13 +1192,103 @@ mod tests {
         blob
     }
 
+    /// Same encryption as Chromium schema 24+: the plaintext is
+    /// `SHA-256(host_key) || value`. `version` selects the blob prefix, which is
+    /// independent of whether the domain hash is present — that combination is
+    /// what the old prefix-based stripping got wrong.
+    fn encrypt_like_chromium(
+        value: &[u8],
+        host_key: &str,
+        key: &[u8; 16],
+        version: &[u8; 3],
+    ) -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        let mut plain = Sha256::digest(host_key.as_bytes()).to_vec();
+        plain.extend_from_slice(value);
+        let mut blob = encrypt_v10(&plain, key);
+        blob[..3].copy_from_slice(version);
+        blob
+    }
+
     #[test]
     fn decrypt_roundtrip_synthetic_v10() {
         let key = [0x2a_u8; 16];
         let secret = "session_id=ABC123; secure";
         let mut blob = encrypt_v10(secret.as_bytes(), &key);
         blob[..3].copy_from_slice(b"v10");
-        assert_eq!(decrypt_chromium_blob(&blob, &key).as_deref(), Some(secret));
+        assert_eq!(
+            decrypt_chromium_blob(&blob, &key, "example.com").as_deref(),
+            Some(secret),
+            "a pre-schema-24 value carries no domain hash and must survive intact"
+        );
+    }
+
+    /// The exact combination from the reported field failure: Brave Origin,
+    /// cookie schema v24, `v11` blobs, 409 rows. The domain hash must be
+    /// stripped or every cookie fails to parse.
+    #[test]
+    fn decrypts_schema24_v11_blob_with_domain_hash() {
+        let key = [0x2a_u8; 16];
+        let host = "instagram.com";
+        let value = "abc123";
+        let blob = encrypt_like_chromium(value.as_bytes(), host, &key, b"v11");
+        assert_eq!(
+            decrypt_chromium_blob(&blob, &key, host).as_deref(),
+            Some(value),
+            "v11 + schema 24 must strip the verified domain hash"
+        );
+    }
+
+    /// A `v10` blob on a schema-24 database also carries the hash. Deciding from
+    /// the prefix alone left it in place, and the binary prefix made
+    /// `from_utf8` fail even though the key was right.
+    #[test]
+    fn decrypts_schema24_v10_blob_with_domain_hash() {
+        let key = [0x2a_u8; 16];
+        let host = "instagram.com";
+        let value = "abc123";
+        let blob = encrypt_like_chromium(value.as_bytes(), host, &key, b"v10");
+        assert_eq!(
+            decrypt_chromium_blob(&blob, &key, host).as_deref(),
+            Some(value),
+            "v10 + schema 24 must strip the verified domain hash"
+        );
+    }
+
+    /// A `v11` blob with no domain hash: the old code truncated the first 32
+    /// bytes of a real value.
+    #[test]
+    fn keeps_long_value_untouched_when_no_hash_present() {
+        let key = [0x2a_u8; 16];
+        let host = "instagram.com";
+        let value = "a-cookie-value-that-is-definitely-longer-than-thirty-two-bytes";
+        let mut blob = encrypt_v10(value.as_bytes(), &key);
+        blob[..3].copy_from_slice(b"v11");
+        assert_eq!(
+            decrypt_chromium_blob(&blob, &key, host).as_deref(),
+            Some(value),
+            "without a matching hash nothing may be stripped"
+        );
+    }
+
+    /// A domain hash belonging to another cookie is not ours to strip. Since it
+    /// is raw digest bytes, leaving it in place makes the plaintext invalid
+    /// UTF-8 and the value is rejected — which is the same outcome Chromium
+    /// reaches when its own check fails, instead of us silently trusting a
+    /// value moved between domains.
+    #[test]
+    fn rejects_a_domain_hash_belonging_to_another_cookie() {
+        use sha2::{Digest, Sha256};
+        let key = [0x2a_u8; 16];
+        let mut plain = Sha256::digest("evil.example.com".as_bytes()).to_vec();
+        plain.extend_from_slice(b"value");
+        let mut blob = encrypt_v10(&plain, &key);
+        blob[..3].copy_from_slice(b"v11");
+        assert_eq!(
+            decrypt_chromium_blob(&blob, &key, "instagram.com"),
+            None,
+            "a hash from another domain must never be stripped as if it were ours"
+        );
     }
 
     #[test]
@@ -1312,7 +1464,7 @@ mod tests {
         // length no longer matches the padding content.
         blob[len - 2] ^= 0xff;
         assert_eq!(
-            decrypt_chromium_blob(&blob, &key),
+            decrypt_chromium_blob(&blob, &key, "example.com"),
             None,
             "inconsistent PKCS#7 padding must be rejected"
         );
@@ -1323,7 +1475,10 @@ mod tests {
         let key = [0x2a_u8; 16];
         for plain in ["x", "sessionid=ABC123; secure"] {
             let blob = encrypt_v10(plain.as_bytes(), &key);
-            assert_eq!(decrypt_chromium_blob(&blob, &key).as_deref(), Some(plain));
+            assert_eq!(
+                decrypt_chromium_blob(&blob, &key, "example.com").as_deref(),
+                Some(plain)
+            );
         }
     }
 
@@ -1335,11 +1490,11 @@ mod tests {
         // A last byte of 0x00 (invalid) and one above the block size must both
         // be refused before any slicing happens.
         blob[len - 1] = 0x00;
-        assert_eq!(decrypt_chromium_blob(&blob, &key), None);
+        assert_eq!(decrypt_chromium_blob(&blob, &key, "example.com"), None);
         let mut blob2 = encrypt_v10(b"value", &key);
         let l2 = blob2.len();
         blob2[l2 - 1] = 0xff;
-        assert_eq!(decrypt_chromium_blob(&blob2, &key), None);
+        assert_eq!(decrypt_chromium_blob(&blob2, &key, "example.com"), None);
     }
 
     // ─── SQLite reader ─────────────────────────────────────────────────────
