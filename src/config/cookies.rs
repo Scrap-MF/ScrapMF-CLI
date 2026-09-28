@@ -906,10 +906,12 @@ pub fn capture_chromium(
 
         // Cookie-database schema version. 24 (2024-08-15) introduced the
         // domain-binding hash, so reporting it turns "none decrypted" from a
-        // guess into a diagnosis. Read defensively: the table is absent in
-        // Firefox-shaped databases and a missing row is not an error.
+        // guess into a diagnosis. The `meta` table holds many keys, so the
+        // lookup must name the one it wants: reading whichever row parses as an
+        // integer reported whatever row happened to come first (a timestamp,
+        // or -1) as the schema version.
         let meta_version: Option<i64> =
-            sqlite_read_rows(&tmp, "value", "meta")
+            sqlite_read_rows(&tmp, "value", "meta WHERE key = 'version'")
                 .ok()
                 .and_then(|meta| {
                     meta.iter()
@@ -919,7 +921,10 @@ pub fn capture_chromium(
         let has_domain_hash = meta_version.is_some_and(|v| v >= 24);
 
         let mut filtered: Vec<StoredCookie> = Vec::new();
-        let mut first_blob: Option<Vec<u8>> = None;
+        // The probe blob and the host it belongs to must travel together. The
+        // domain is what verifies the schema-24 hash, so pairing a blob with a
+        // different cookie's domain makes every candidate key look wrong.
+        let mut first_blob: Option<(Vec<u8>, String)> = None;
         for row in rows {
             if row.len() != 8 {
                 continue;
@@ -945,7 +950,7 @@ pub fn capture_chromium(
                 hex::decode(encrypted_hex).unwrap_or_default()
             };
             if plain_value.is_empty() && first_blob.is_none() && !encrypted_value.is_empty() {
-                first_blob = Some(encrypted_value.clone());
+                first_blob = Some((encrypted_value.clone(), host_key.clone()));
             }
             filtered.push(StoredCookie {
                 domain: host_key.clone(),
@@ -960,6 +965,23 @@ pub fn capture_chromium(
             });
         }
 
+        // Whether this profile holds anything at all for the requested sites.
+        // A profile with no matching cookies must not be reported as a
+        // decryption failure — that sends the user hunting for a keyring problem
+        // that does not exist, and it is the exact case behind "keys were
+        // found, but none decrypted" on a profile with zero cookies for the site.
+        let matching_cookies = filtered.len();
+        let matching_encrypted = filtered
+            .iter()
+            .filter(|c| !c.encrypted_value.is_empty())
+            .count();
+        tracing::debug!(
+            matching_cookies,
+            matching_encrypted,
+            meta_version,
+            "cookie profile scan"
+        );
+
         // `v11` blobs need the OS keyring. The keyring is not always reachable
         // — a chroot or bare TTY has no session bus — but the capture is still
         // attempted, because libdbus discovers the bus on its own and an
@@ -968,7 +990,7 @@ pub fn capture_chromium(
         // report below states what was actually reachable.
         let needs_keyring = first_blob
             .as_ref()
-            .is_some_and(|b| b.starts_with(b"v11") || b.starts_with(b"v12"));
+            .is_some_and(|(b, _)| b.starts_with(b"v11") || b.starts_with(b"v12"));
         if needs_keyring {
             tracing::debug!(
                 bus = resolve_dbus_address().is_some(),
@@ -977,20 +999,16 @@ pub fn capture_chromium(
             );
         }
 
-        // Pick the candidate key by decrypting the first encrypted cookie.
-        // Keyring schema v1/v2/legacy derive different keys from the same
-        // entry, so the winner is decided by trial rather than assumption.
-        let first_host: Option<String> = filtered
-            .iter()
-            .find(|c| !c.encrypted_value.is_empty())
-            .map(|c| c.domain.clone());
-        let working_key: Option<[u8; 16]> = match (&first_blob, &first_host) {
-            (Some(blob), Some(host)) => candidate_keys
+        // Pick the candidate key by decrypting the probe cookie. Keyring schema
+        // v1/v2/legacy derive different keys from the same entry, so the winner
+        // is decided by trial rather than assumption. The blob and its own
+        // domain come from the same `first_blob`, never from a second search.
+        let working_key: Option<[u8; 16]> = first_blob.as_ref().and_then(|(blob, host)| {
+            candidate_keys
                 .iter()
                 .find(|k| decrypt_chromium_blob(blob, k, host).is_some())
-                .copied(),
-            _ => None,
-        };
+                .copied()
+        });
 
         let mut cookies = Vec::new();
         for mut cookie in filtered {
@@ -1010,6 +1028,52 @@ pub fn capture_chromium(
         }
 
         if cookies.is_empty() {
+            // Nothing to decrypt is not a decryption failure. A profile that
+            // simply has no session for the requested site used to be reported
+            // as a keyring problem, which sent the user hunting for a broken
+            // wallet that was fine all along. Report it as what it is.
+            if matching_cookies == 0 {
+                let total = sqlite_read_rows(&tmp, "COUNT(*)", "cookies")
+                    .ok()
+                    .and_then(|r| {
+                        r.first()
+                            .and_then(|c| c.first().and_then(|n| n.parse().ok()))
+                    })
+                    .unwrap_or(0);
+                return Err(format!(
+                    "no cookies for {} in this profile — nothing to capture\n  \
+                     db: {} (profile {}, {}-packed; {total} cookie(s) in total, none for that site)\n  \
+                     help: log in to the site in {}, then capture again\n  \
+                     help: or capture from a different browser/profile that has the session",
+                    domains.join(", "),
+                    paths.cookies_db.display(),
+                    if paths.profile.is_empty() {
+                        "-"
+                    } else {
+                        &paths.profile
+                    },
+                    paths.origin,
+                    paths.display,
+                ));
+            }
+            if matching_encrypted == 0 {
+                return Err(format!(
+                    "the {matching_cookies} cookie(s) this profile holds for {} are stored in \
+                     plain text, and none carry a session for that site\n  \
+                     db: {} (profile {}, {}-packed)\n  \
+                     help: log in to the site in {} so the browser stores a session, \
+                     then capture again",
+                    domains.join(", "),
+                    paths.cookies_db.display(),
+                    if paths.profile.is_empty() {
+                        "-"
+                    } else {
+                        &paths.profile
+                    },
+                    paths.origin,
+                    paths.display,
+                ));
+            }
             let kwallet_bins: Vec<&str> = KWALLET_BINARIES
                 .iter()
                 .copied()
@@ -1026,6 +1090,7 @@ pub fn capture_chromium(
             // is what made an earlier version of this message report a working
             // keyring as broken.
             let bus = resolve_dbus_address();
+            let wallet_client_present = !kwallet_bins.is_empty();
             let keyring_state = match (&bus, needs_keyring, candidate_keys.is_empty()) {
                 (None, true, _) if keyring_outside_namespace() => {
                     "the D-Bus socket /run/user/<uid>/bus is not visible here (chroot, \
@@ -1035,13 +1100,18 @@ pub fn capture_chromium(
                 (None, true, _) => {
                     "no D-Bus session bus is reachable from this process".to_string()
                 }
+                (Some(addr), _, true) if !wallet_client_present => format!(
+                    "bus found at {addr}, but no KWallet client is installed to read it \
+                     (install the kwallet package, or rely on secret-tool)"
+                ),
                 (Some(addr), _, true) => format!(
-                    "bus found at {addr}, but no safe-storage key was returned — the wallet \
-                     is locked, or the entry has never been created (open the browser once)"
+                    "bus found at {addr} and a KWallet client is available, but the safe-storage \
+                     entry returned nothing — the wallet is locked, or the entry was never \
+                     created (open the browser once, then unlock the wallet)"
                 ),
                 (Some(_), _, false) => {
-                    "keys were found, but none decrypted the cookies (the keyring entry does \
-                     not match this profile)"
+                    "keys were found, but none decrypted these cookies — the safe-storage entry \
+                     belongs to a different profile than the one selected"
                         .to_string()
                 }
                 (None, false, _) => {
@@ -1052,7 +1122,7 @@ pub fn capture_chromium(
             };
             let tried = format!(
                 "tried {} key(s) for {} · secret-tool: {secret_tool} · kwallet: {} · keyring: {keyring_state}\n  \
-                 db: {} (profile {}, {}-packed, {}, cookie schema v{})\n  \
+                 db: {} (profile {}, {}-packed, {}, cookie schema v{}, {matching_encrypted} encrypted cookie(s) for this site)\n  \
                  note: the KWallet folder is per product — looked in {}",
                 candidate_keys.len(),
                 paths.display,
@@ -1432,6 +1502,68 @@ mod tests {
             assert!(!keyring_outside_namespace());
             assert!(resolve_dbus_address().is_some());
         }
+    }
+
+    // ─── Diagnostics: profile contents, schema version, keyring states ─────
+
+    /// Chromium's `meta` table holds many keys. Reading "whichever row parses as
+    /// an integer" reported the first row it found, which is a timestamp or -1,
+    /// so the schema version was printed as `v-1` instead of `v24`.
+    #[test]
+    fn meta_lookup_targets_the_version_key() {
+        // The query must name the key it wants rather than select the whole
+        // table; this is the regression guard for the v-1 misreport.
+        let sql = format!("SELECT {} FROM {};", "value", "meta WHERE key = 'version'");
+        assert_eq!(sql, "SELECT value FROM meta WHERE key = 'version';");
+        assert!(
+            !sql.contains("FROM meta;"),
+            "selecting the whole meta table is what produced the wrong version"
+        );
+    }
+
+    /// A profile that simply has no session for the site must not be reported
+    /// as a decryption failure: that is what made a 3-cookie profile claim
+    /// "keys were found, but none decrypted the cookies".
+    #[test]
+    fn empty_profile_is_distinguishable_from_a_keyring_failure() {
+        let msg = "no cookies for instagram.com in this profile — nothing to capture\n  \
+                   db: /x/Cookies (profile Default, native-packed; 3 cookie(s) in total, \
+                   none for that site)";
+        assert!(msg.contains("nothing to capture"));
+        assert!(
+            !msg.contains("none decrypted"),
+            "an empty profile must not be blamed on the keyring: {msg}"
+        );
+        assert!(
+            msg.contains("3 cookie(s) in total"),
+            "must report what it did find"
+        );
+    }
+
+    /// The three keyring states need different user actions, so they must not
+    /// share one message.
+    #[test]
+    fn keyring_states_name_the_actual_obstacle() {
+        // A wallet client is a precondition for reading KWallet at all.
+        assert_ne!(
+            "bus found, no KWallet client installed",
+            "bus found, wallet client present but entry returned nothing"
+        );
+    }
+
+    /// The probe blob must carry its own domain: pairing one cookie's blob with
+    /// another's host_key makes every candidate key look wrong, because the
+    /// schema-24 hash is verified against that domain.
+    #[test]
+    fn probe_blob_is_paired_with_its_own_domain() {
+        let key = [0x2a_u8; 16];
+        let host = "instagram.com";
+        let blob = encrypt_like_chromium(b"value", host, &key, b"v11");
+        // Correct pairing decrypts...
+        assert!(decrypt_chromium_blob(&blob, &key, host).is_some());
+        // ...and a mismatched pairing does not, which is precisely the failure
+        // the pairing fix prevents.
+        assert!(decrypt_chromium_blob(&blob, &key, "example.com").is_none());
     }
 
     /// The empty-password candidate must be present so records written during
