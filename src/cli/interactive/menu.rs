@@ -47,6 +47,16 @@ impl<T> Step<T> {
     }
 }
 
+/// Hint line for a multi-select.
+///
+/// Separate from [`key_hint`] because `Enter` does something different here:
+/// it picks the highlighted row unless rows are already checked, so "confirm"
+/// alone both hid the `Space` shortcut and described the wrong behaviour.
+fn multi_hint(back: bool) -> String {
+    let tail = if back { "esc back" } else { "esc cancel" };
+    format!("↑↓ move · ⏎ pick this one · space adds more · a all/none · {tail}")
+}
+
 /// Hint line describing the keys, shown in prompts that support going back.
 pub fn key_hint(back: bool) -> String {
     if back {
@@ -135,9 +145,7 @@ fn pick_multi_inner(
     }
     let title = chrome_title(context);
     let mut b = Browser::new(title).mode(Mode::Multi).checked(prechecked);
-    if back {
-        b = b.hint(key_hint(true));
-    }
+    b = b.hint(multi_hint(back));
     for (label, details) in options {
         b = b.entry(label, details);
     }

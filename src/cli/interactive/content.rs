@@ -227,7 +227,8 @@ pub(super) fn prompt_content_kinds(site: &str, label: &str) -> menu::Step<Vec<Co
         .into_iter()
         .filter_map(|i| opts.get(i).map(|(l, _)| l.clone()))
         .collect();
-    // Confirming nothing is a legitimate answer; only Esc means "go back".
+    // Only reachable without a TTY: in the app `Enter` on an unchecked list
+    // picks the highlighted row, so a confirmation always carries something.
     if picked.is_empty() {
         return menu::Step::Value(Vec::new());
     }

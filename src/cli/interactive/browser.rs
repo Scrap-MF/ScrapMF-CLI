@@ -166,13 +166,22 @@ fn outcome_for(
     if confirmed {
         return match mode {
             Mode::Single => Outcome::Picked(cursor),
-            Mode::Multi => Outcome::Toggled(
-                checked
+            Mode::Multi => {
+                let picked: Vec<usize> = checked
                     .iter()
                     .enumerate()
                     .filter_map(|(i, v)| v.then_some(i))
-                    .collect(),
-            ),
+                    .collect();
+                // Enter on the highlighted row means "just this one", the same
+                // as a single-select. An empty check list used to read as
+                // "chose none", which every caller treats as aborting the run,
+                // so Enter looked broken and Space was the only way in.
+                if picked.is_empty() {
+                    Outcome::Toggled(vec![cursor])
+                } else {
+                    Outcome::Toggled(picked)
+                }
+            }
         };
     }
     // No key ever settled the loop (no TTY, empty list): nothing was chosen.
@@ -291,7 +300,11 @@ fn run_browser(
                 Some(h) => h.to_string(),
                 None => match mode {
                     Mode::Single => "↑↓ Navigate · Enter Select · q Cancel",
-                    Mode::Multi => "↑↓ Move · Space Toggle · a All/None · Enter Confirm · q Cancel",
+                    // Mirrors `multi_hint`: Enter picks the highlighted row
+                    // when nothing is checked, Space is for picking more.
+                    Mode::Multi => {
+                        "↑↓ Move · ⏎ Pick This One · Space Adds More · a All/None · q Cancel"
+                    }
                 }
                 .to_string(),
             };
@@ -359,6 +372,17 @@ mod tests {
         assert_eq!(
             outcome_for(true, false, false, Mode::Multi, 0, &checked),
             Outcome::Toggled(vec![1, 3])
+        );
+    }
+
+    #[test]
+    fn enter_on_an_unchecked_row_picks_it_in_multi_mode() {
+        // Space is only needed for more than one. Without this, Enter with
+        // nothing checked returned an empty selection, which every caller
+        // treats as aborting the run, so Enter looked like it did nothing.
+        assert_eq!(
+            outcome_for(true, false, false, Mode::Multi, 1, &[false; 3]),
+            Outcome::Toggled(vec![1])
         );
     }
 
