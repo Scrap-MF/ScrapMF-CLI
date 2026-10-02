@@ -243,228 +243,235 @@ pub(super) fn prompt_scrape_as_profile() {
             return;
         }
 
-        // Content selection. Extracted so the preview can send the user back here:
-        // the batch it previews is exactly what these answers decide.
-        let per_account_kinds = match choose_content_kinds(&selected) {
-            ContentPick::Kinds(k) => k,
-            // Esc steps back to the account list, which is where a wrong choice
-            // most often needs fixing.
-            ContentPick::Back => continue 'wizard,
-            ContentPick::Leave => return,
-        };
-
-        // Build ScrapeRequests per account with only the chosen content URLs
-        let mut requests: Vec<(ScrapeRequest, String, String, String)> = Vec::new(); // (req, site, username, kinds desc)
-        for ((site_name, _label, account), kinds) in selected.iter().zip(per_account_kinds.iter()) {
-            let username = account
-                .username
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string());
-            let tagged = build_tagged_urls(site_name, &username);
-            let Some((url, extra_urls)) = select_urls(&tagged, kinds) else {
-                continue;
+        // Content selection, request building and the preview form their own
+        // loop: Esc on the preview returns here, to the question that decided
+        // what the batch downloads, instead of restarting at the profile list.
+        // The batch is rebuilt every pass because the preview consumes it.
+        loop {
+            let per_account_kinds = match choose_content_kinds(&selected) {
+                ContentPick::Kinds(k) => k,
+                // Esc steps back to the account list, which is where a wrong choice
+                // most often needs fixing.
+                ContentPick::Back => continue 'wizard,
+                ContentPick::Leave => return,
             };
-            if validate_url(&url).is_err() {
-                eprintln!("warn: skipping invalid url {url}");
-                continue;
-            }
-            let kinds_desc = kinds_description(site_name, kinds);
-            let site_cfg = cfg.sites.get(site_name.as_str()).cloned();
-            // Resolve fields: account > site > profile > general
-            let mut cookies_from_browser: Option<String> = account
-                .cookies_from_browser
-                .clone()
-                .or_else(|| profile.cookies_from_browser.clone());
-            let mut cookies_file: Option<PathBuf> =
-                account.cookies.clone().or_else(|| profile.cookies.clone());
-            let mut archive: Option<PathBuf> = None;
-            let mut rate_limit: Option<crate::config::RateLimit> = None;
-            let mut extractor_options: std::collections::HashMap<String, toml::Value> =
-                std::collections::HashMap::new();
-            let mut output_from_config: Option<PathBuf> = account
-                .output_dir
-                .clone()
-                .or_else(|| profile.output_dir.clone());
 
-            if let Some(ref site) = site_cfg {
-                if cookies_from_browser.is_none() {
-                    cookies_from_browser = site.cookies_from_browser.clone();
-                }
-                if cookies_file.is_none() {
-                    cookies_file = site.cookies.clone();
-                }
-                if archive.is_none() {
-                    archive = site.archive.clone();
-                }
-                if rate_limit.is_none() {
-                    rate_limit = site.rate_limit.clone();
-                }
-                if output_from_config.is_none() {
-                    output_from_config = site.output_dir.clone();
-                }
-                extractor_options = site.extractor.clone();
-            }
-            // Cookie profiles (named Netscape files) outrank browser cookies:
-            // a friend's stored session must not be silently replaced by ours.
-            // Precedence: account > profile > site.
-            if let Some(name) = account
-                .cookie_profile
-                .as_deref()
-                .or(profile.cookie_profile.as_deref())
-                .or(site_cfg.as_ref().and_then(|s| s.cookie_profile.as_deref()))
+            // Build ScrapeRequests per account with only the chosen content URLs
+            let mut requests: Vec<(ScrapeRequest, String, String, String)> = Vec::new(); // (req, site, username, kinds desc)
+            for ((site_name, _label, account), kinds) in
+                selected.iter().zip(per_account_kinds.iter())
             {
-                match crate::config::cookies::profile_path(name) {
-                    Some(p) if p.exists() => {
-                        cookies_file = Some(p);
-                        cookies_from_browser = None;
+                let username = account
+                    .username
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                let tagged = build_tagged_urls(site_name, &username);
+                let Some((url, extra_urls)) = select_urls(&tagged, kinds) else {
+                    continue;
+                };
+                if validate_url(&url).is_err() {
+                    eprintln!("warn: skipping invalid url {url}");
+                    continue;
+                }
+                let kinds_desc = kinds_description(site_name, kinds);
+                let site_cfg = cfg.sites.get(site_name.as_str()).cloned();
+                // Resolve fields: account > site > profile > general
+                let mut cookies_from_browser: Option<String> = account
+                    .cookies_from_browser
+                    .clone()
+                    .or_else(|| profile.cookies_from_browser.clone());
+                let mut cookies_file: Option<PathBuf> =
+                    account.cookies.clone().or_else(|| profile.cookies.clone());
+                let mut archive: Option<PathBuf> = None;
+                let mut rate_limit: Option<crate::config::RateLimit> = None;
+                let mut extractor_options: std::collections::HashMap<String, toml::Value> =
+                    std::collections::HashMap::new();
+                let mut output_from_config: Option<PathBuf> = account
+                    .output_dir
+                    .clone()
+                    .or_else(|| profile.output_dir.clone());
+
+                if let Some(ref site) = site_cfg {
+                    if cookies_from_browser.is_none() {
+                        cookies_from_browser = site.cookies_from_browser.clone();
                     }
-                    _ => println!(
-                        "⚠ cookie profile '{name}' not found — falling back to browser/session defaults"
-                    ),
+                    if cookies_file.is_none() {
+                        cookies_file = site.cookies.clone();
+                    }
+                    if archive.is_none() {
+                        archive = site.archive.clone();
+                    }
+                    if rate_limit.is_none() {
+                        rate_limit = site.rate_limit.clone();
+                    }
+                    if output_from_config.is_none() {
+                        output_from_config = site.output_dir.clone();
+                    }
+                    extractor_options = site.extractor.clone();
                 }
-            }
-            // overrides per site from profile
-            let mut filename_template: Option<String> =
-                site_cfg.as_ref().and_then(|s| s.filename_template.clone());
-            let mut directory_template: Option<Vec<String>> =
-                site_cfg.as_ref().and_then(|s| s.directory_template.clone());
-            if let Some(ov) = profile.overrides.get(site_name.as_str()) {
-                if let Some(ref rl) = ov.rate_limit {
-                    rate_limit = Some(rl.clone());
-                }
-                if let Some(ref a) = ov.archive {
-                    archive = Some(a.clone());
-                }
-                if let Some(ref ft) = ov.filename_template {
-                    filename_template = Some(ft.clone());
-                }
-                if let Some(ref dt) = ov.directory_template {
-                    directory_template = Some(dt.clone());
-                }
-                for (k, v) in &ov.extractor {
-                    extractor_options.insert(k.clone(), v.clone());
-                }
-            }
-
-            // TikTok real filtering: selecting only Videos or only Photos sets the
-            // extractor's native photos/videos options (verified in tiktok.py:
-            // self.photo = config("photos", True); self.video = config("videos", True))
-            if site_name == "tiktok" {
-                let wants_videos = kinds.contains(&ContentKind::Videos);
-                let wants_photos = kinds.contains(&ContentKind::Photos);
-                if wants_videos != wants_photos {
-                    let posts = extractor_options
-                        .entry("tiktok:posts".to_string())
-                        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-                    if let toml::Value::Table(map) = posts {
-                        map.insert("photos".to_string(), toml::Value::Boolean(wants_photos));
-                        map.insert("videos".to_string(), toml::Value::Boolean(wants_videos));
+                // Cookie profiles (named Netscape files) outrank browser cookies:
+                // a friend's stored session must not be silently replaced by ours.
+                // Precedence: account > profile > site.
+                if let Some(name) = account
+                    .cookie_profile
+                    .as_deref()
+                    .or(profile.cookie_profile.as_deref())
+                    .or(site_cfg.as_ref().and_then(|s| s.cookie_profile.as_deref()))
+                {
+                    match crate::config::cookies::profile_path(name) {
+                        Some(p) if p.exists() => {
+                            cookies_file = Some(p);
+                            cookies_from_browser = None;
+                        }
+                        _ => println!(
+                            "⚠ cookie profile '{name}' not found — falling back to browser/session defaults"
+                        ),
                     }
                 }
-            }
-
-            let mut extra_args: Vec<String> = Vec::new();
-            if let Some(ref site) = site_cfg {
-                extra_args.extend(site.extra_args.clone());
-            }
-            extra_args.extend(account.extra_args.clone());
-
-            let output = output_from_config
-                .clone()
-                .or_else(|| Some(crate::config::expand_output_dir(&cfg.general.output_dir)));
-
-            // Twitter Media needs TWO passes (photos / videos): per-FILE conditional
-            // directories don't work on twitter ({type} is only set after the
-            // Directory message), so each pass pre-filters with file-filter and
-            // pins a static directory. Profile URLs ride along the videos pass.
-            if site_name == "twitter" && kinds.contains(&ContentKind::Media) {
-                for (pass, dir_name, filter) in [
-                    ("photos", "photos", "type == 'photo'"),
-                    ("videos", "videos", "type != 'photo'"),
-                ] {
-                    let mut opts = extractor_options.clone();
-                    let media = opts
-                        .entry("twitter:media".to_string())
-                        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-                    if let toml::Value::Table(map) = media {
-                        map.insert(
-                            "directory".to_string(),
-                            toml::Value::Array(vec![
-                                toml::Value::String("{scrapmf_root}".to_string()),
-                                toml::Value::String("{category}".to_string()),
-                                toml::Value::String("{user[name]}".to_string()),
-                                toml::Value::String(dir_name.to_string()),
-                            ]),
-                        );
-                        map.insert(
-                            "file-filter".to_string(),
-                            toml::Value::String(filter.to_string()),
-                        );
+                // overrides per site from profile
+                let mut filename_template: Option<String> =
+                    site_cfg.as_ref().and_then(|s| s.filename_template.clone());
+                let mut directory_template: Option<Vec<String>> =
+                    site_cfg.as_ref().and_then(|s| s.directory_template.clone());
+                if let Some(ov) = profile.overrides.get(site_name.as_str()) {
+                    if let Some(ref rl) = ov.rate_limit {
+                        rate_limit = Some(rl.clone());
                     }
-                    let pass_req = ScrapeRequest {
-                        url: url.clone(),
-                        output: output.clone(),
-                        preset: Some(site_name.clone()),
-                        extra_args: extra_args.clone(),
-                        cookies_from_browser: cookies_from_browser.clone(),
-                        cookies_file: cookies_file.clone(),
-                        archive: archive.clone(),
-                        rate_limit: rate_limit.clone(),
-                        extractor_options: opts,
-                        filename_template: filename_template.clone(),
-                        directory_template: None,
-                        // Profile URLs ride the videos pass; photos pass gets none.
-                        extra_urls: if pass == "videos" {
-                            extra_urls
-                                .iter()
-                                .filter(|u| !u.ends_with("/media"))
-                                .cloned()
-                                .collect()
-                        } else {
-                            Vec::new()
-                        },
-                        profile_name: Some(profile_choice.clone()),
-                        extra_extractor_opts: Vec::new(),
-
-                        ..Default::default()
-                    };
-                    requests.push((
-                        pass_req,
-                        site_name.clone(),
-                        format!("{username} ({pass})"),
-                        pass.to_string(),
-                    ));
+                    if let Some(ref a) = ov.archive {
+                        archive = Some(a.clone());
+                    }
+                    if let Some(ref ft) = ov.filename_template {
+                        filename_template = Some(ft.clone());
+                    }
+                    if let Some(ref dt) = ov.directory_template {
+                        directory_template = Some(dt.clone());
+                    }
+                    for (k, v) in &ov.extractor {
+                        extractor_options.insert(k.clone(), v.clone());
+                    }
                 }
-                continue;
+
+                // TikTok real filtering: selecting only Videos or only Photos sets the
+                // extractor's native photos/videos options (verified in tiktok.py:
+                // self.photo = config("photos", True); self.video = config("videos", True))
+                if site_name == "tiktok" {
+                    let wants_videos = kinds.contains(&ContentKind::Videos);
+                    let wants_photos = kinds.contains(&ContentKind::Photos);
+                    if wants_videos != wants_photos {
+                        let posts = extractor_options
+                            .entry("tiktok:posts".to_string())
+                            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+                        if let toml::Value::Table(map) = posts {
+                            map.insert("photos".to_string(), toml::Value::Boolean(wants_photos));
+                            map.insert("videos".to_string(), toml::Value::Boolean(wants_videos));
+                        }
+                    }
+                }
+
+                let mut extra_args: Vec<String> = Vec::new();
+                if let Some(ref site) = site_cfg {
+                    extra_args.extend(site.extra_args.clone());
+                }
+                extra_args.extend(account.extra_args.clone());
+
+                let output = output_from_config
+                    .clone()
+                    .or_else(|| Some(crate::config::expand_output_dir(&cfg.general.output_dir)));
+
+                // Twitter Media needs TWO passes (photos / videos): per-FILE conditional
+                // directories don't work on twitter ({type} is only set after the
+                // Directory message), so each pass pre-filters with file-filter and
+                // pins a static directory. Profile URLs ride along the videos pass.
+                if site_name == "twitter" && kinds.contains(&ContentKind::Media) {
+                    for (pass, dir_name, filter) in [
+                        ("photos", "photos", "type == 'photo'"),
+                        ("videos", "videos", "type != 'photo'"),
+                    ] {
+                        let mut opts = extractor_options.clone();
+                        let media = opts
+                            .entry("twitter:media".to_string())
+                            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+                        if let toml::Value::Table(map) = media {
+                            map.insert(
+                                "directory".to_string(),
+                                toml::Value::Array(vec![
+                                    toml::Value::String("{scrapmf_root}".to_string()),
+                                    toml::Value::String("{category}".to_string()),
+                                    toml::Value::String("{user[name]}".to_string()),
+                                    toml::Value::String(dir_name.to_string()),
+                                ]),
+                            );
+                            map.insert(
+                                "file-filter".to_string(),
+                                toml::Value::String(filter.to_string()),
+                            );
+                        }
+                        let pass_req = ScrapeRequest {
+                            url: url.clone(),
+                            output: output.clone(),
+                            preset: Some(site_name.clone()),
+                            extra_args: extra_args.clone(),
+                            cookies_from_browser: cookies_from_browser.clone(),
+                            cookies_file: cookies_file.clone(),
+                            archive: archive.clone(),
+                            rate_limit: rate_limit.clone(),
+                            extractor_options: opts,
+                            filename_template: filename_template.clone(),
+                            directory_template: None,
+                            // Profile URLs ride the videos pass; photos pass gets none.
+                            extra_urls: if pass == "videos" {
+                                extra_urls
+                                    .iter()
+                                    .filter(|u| !u.ends_with("/media"))
+                                    .cloned()
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            },
+                            profile_name: Some(profile_choice.clone()),
+                            extra_extractor_opts: Vec::new(),
+
+                            ..Default::default()
+                        };
+                        requests.push((
+                            pass_req,
+                            site_name.clone(),
+                            format!("{username} ({pass})"),
+                            pass.to_string(),
+                        ));
+                    }
+                    continue;
+                }
+
+                let req = ScrapeRequest {
+                    url: url.clone(),
+                    output,
+                    preset: Some(site_name.clone()),
+                    extra_args,
+                    cookies_from_browser,
+                    cookies_file,
+                    archive,
+                    rate_limit,
+                    extractor_options,
+                    filename_template: filename_template.clone(),
+                    directory_template: directory_template.clone(),
+                    extra_urls: extra_urls.clone(),
+                    profile_name: Some(profile_choice.clone()),
+                    extra_extractor_opts: Vec::new(),
+
+                    ..Default::default()
+                };
+                requests.push((req, site_name.clone(), username, kinds_desc));
             }
 
-            let req = ScrapeRequest {
-                url: url.clone(),
-                output,
-                preset: Some(site_name.clone()),
-                extra_args,
-                cookies_from_browser,
-                cookies_file,
-                archive,
-                rate_limit,
-                extractor_options,
-                filename_template: filename_template.clone(),
-                directory_template: directory_template.clone(),
-                extra_urls: extra_urls.clone(),
-                profile_name: Some(profile_choice.clone()),
-                extra_extractor_opts: Vec::new(),
-
-                ..Default::default()
-            };
-            requests.push((req, site_name.clone(), username, kinds_desc));
-        }
-
-        match preview_and_execute(requests, &cfg) {
-            Step::Value(()) => break,
-            Step::Cancel => return,
-            // Esc on the preview returns to the content question, the last thing
-            // that decided what this batch downloads.
-            Step::Back => {}
+            match preview_and_execute(requests, &cfg) {
+                // Leaves the wizard so the "press enter" prompt below still runs.
+                Step::Value(()) => break 'wizard,
+                Step::Cancel => return,
+                // Esc on the preview returns to the content question, which this
+                // loop asks again.
+                Step::Back => {}
+            }
         }
     }
     let _ = Text::new("Press enter to continue")

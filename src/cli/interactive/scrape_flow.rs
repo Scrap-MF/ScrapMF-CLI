@@ -13,6 +13,36 @@ use super::menu::Step;
 /// `(request, site key, label shown in the UI, content description)`.
 pub(super) type ScrapeJob = (ScrapeRequest, String, String, String);
 
+/// The session chosen for this run, and whether the question was shown at all.
+///
+/// `asked` exists because this question is conditional: with no stored
+/// profiles there is nothing to ask, so a step back aimed at it would be a
+/// no-op that lands the user on the same preview they just left.
+pub(super) struct CookiePick {
+    /// The chosen cookie profile, or `None` to keep the site defaults.
+    pub file: Option<PathBuf>,
+    /// False when the question was skipped, so there is nothing to go back to.
+    pub asked: bool,
+}
+
+impl CookiePick {
+    fn skipped() -> Self {
+        Self {
+            file: None,
+            asked: false,
+        }
+    }
+}
+
+/// Whether the cookie question has to be shown.
+///
+/// Both conditions matter. Without a TTY there is nobody to answer, and
+/// without a stored profile there is nothing to choose between the defaults
+/// and.
+fn should_ask_cookies(is_tty: bool, profile_count: usize) -> bool {
+    is_tty && profile_count > 0
+}
+
 /// Decide which cookie source a run should use, after the user has chosen what
 /// to scrape.
 ///
@@ -23,7 +53,7 @@ pub(super) type ScrapeJob = (ScrapeRequest, String, String, String);
 ///
 /// Behaviour:
 ///
-/// * **no stored profiles** — return `None` without prompting, so a first-time
+/// * **not a TTY, or no stored profiles** — do not prompt, so a first-time
 ///   user goes straight to the site defaults with no extra keystroke;
 /// * **at least one stored profile** — always ask, offering the site default
 ///   alongside the created profiles, so the choice is always explicit.
@@ -31,12 +61,19 @@ pub(super) type ScrapeJob = (ScrapeRequest, String, String, String);
 /// `Step::Back` on Esc returns to the previous question of the flow, and
 /// `Step::Cancel` on Ctrl+C leaves the run. "Use the site default" stays a
 /// single keystroke: it is the first option, which Enter selects.
-pub(super) fn prompt_cookie_override(sites: &[String]) -> Step<Option<PathBuf>> {
+pub(super) fn prompt_cookie_override(sites: &[String]) -> Step<CookiePick> {
     use crate::config::cookies;
 
+    // The TTY check lives here rather than at each call site: `asked` has to be
+    // authoritative, and a caller that forgets the guard would otherwise claim
+    // the user saw a question they never did.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        return Step::Value(CookiePick::skipped());
+    }
+
     let profiles = cookies::list_profiles();
-    if profiles.is_empty() {
-        return Step::Value(None);
+    if !should_ask_cookies(true, profiles.len()) {
+        return Step::Value(CookiePick::skipped());
     }
 
     // Rank profiles that actually carry cookies for these sites first. When no
@@ -88,17 +125,19 @@ pub(super) fn prompt_cookie_override(sites: &[String]) -> Step<Option<PathBuf>> 
         .collect();
     let index = match crate::cli::interactive::menu::pick_single_back(title, entries) {
         Step::Value(i) => i,
-        step => return step.map(|_| None),
+        step => return step.map(|_| CookiePick::skipped()),
     };
-    if index == 0 {
-        return Step::Value(None);
-    }
-    let resolved = ranked
-        .get(index - 1)
-        .map(|(_, name)| name)
-        .and_then(|name| cookies::profile_path(name))
-        .filter(|p| p.exists());
-    Step::Value(resolved)
+    // Index 0 is the site default, which is an explicit answer, not a skip.
+    let file = if index == 0 {
+        None
+    } else {
+        ranked
+            .get(index - 1)
+            .map(|(_, name)| name)
+            .and_then(|name| cookies::profile_path(name))
+            .filter(|p| p.exists())
+    };
+    Step::Value(CookiePick { file, asked: true })
 }
 
 /// Label for the "keep whatever the site config says" option.
@@ -718,28 +757,26 @@ pub(super) fn prompt_scrape_direct_urls() {
             // The sites are derived from the resolved jobs, not guessed, so the
             // profile filter actually has domains to work with.
             let job_sites = distinct_sites(&jobs);
-            // Without a TTY there is nobody to answer: keep the site defaults,
-            // which is what scripts and CI rely on.
-            let asked = if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-                prompt_cookie_override(&job_sites)
-            } else {
-                Step::Value(None)
-            };
-            let cookie_override = match asked {
-                Step::Value(c) => c,
+            let pick = match prompt_cookie_override(&job_sites) {
+                Step::Value(p) => p,
                 // Esc on cookies returns to the URL box, still holding the text.
                 Step::Back => continue 'urls,
                 Step::Cancel => return,
             };
-            if let Some(ref file) = cookie_override {
+            if let Some(ref file) = pick.file {
                 apply_cookie_file_to_site(&mut jobs, file, &job_sites);
             }
 
             match preview_and_execute(jobs, &cfg) {
                 Step::Value(()) | Step::Cancel => return,
-                // Esc on the preview returns to the cookie question, the last
-                // thing that decided how these jobs authenticate.
-                Step::Back => {}
+                Step::Back => {
+                    // Go back to the cookie question only if it was actually
+                    // shown. Without stored profiles it never was, so aiming
+                    // at it here would land on this same preview forever.
+                    if !pick.asked {
+                        continue 'urls;
+                    }
+                }
             }
         }
     }
@@ -1046,18 +1083,14 @@ pub(super) fn prompt_quick_scrape() {
             loop {
                 // Per-run cookie override comes BEFORE ID resolution so resolver uses
                 // the same session that will be used for downloading (same cycle as username).
-                let cookie_override = if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-                    prompt_cookie_override(std::slice::from_ref(&site_name))
-                } else {
-                    Step::Value(None)
-                };
-                let cookie_override = match cookie_override {
-                    Step::Value(c) => c,
+                let pick = match prompt_cookie_override(std::slice::from_ref(&site_name)) {
+                    Step::Value(p) => p,
                     // Esc on cookies goes back to the content list; the site and the
                     // username typed so far are kept.
                     Step::Back => continue 'kinds,
                     Step::Cancel => return,
                 };
+                let cookie_override = pick.file.clone();
                 let (cookies_file_for_resolve, cookies_browser_for_resolve) =
                     if let Some(ref ov) = cookie_override {
                         (Some(ov.as_path()), None)
@@ -1221,9 +1254,14 @@ pub(super) fn prompt_quick_scrape() {
                     }
                     match preview_and_execute(jobs, &cfg) {
                         Step::Value(()) | Step::Cancel => return,
-                        // Esc on the preview returns to the cookie question, which
-                        // the next pass of this loop asks again.
-                        Step::Back => {}
+                        // Esc on the preview goes back to the cookie question
+                        // when there was one to go back to, and to the content
+                        // list when there was not.
+                        Step::Back => {
+                            if !pick.asked {
+                                continue 'kinds;
+                            }
+                        }
                     }
                 }
 
@@ -1310,7 +1348,11 @@ pub(super) fn prompt_quick_scrape() {
                         }
                         match preview_and_execute(jobs, &cfg) {
                             Step::Value(()) | Step::Cancel => return,
-                            Step::Back => {}
+                            Step::Back => {
+                                if !pick.asked {
+                                    continue 'kinds;
+                                }
+                            }
                         }
                     }
                 }
@@ -1319,7 +1361,11 @@ pub(super) fn prompt_quick_scrape() {
                 let jobs = vec![(req, site_name.clone(), username.clone(), kinds_desc)];
                 match preview_and_execute(jobs, &cfg) {
                     Step::Value(()) | Step::Cancel => return,
-                    Step::Back => {}
+                    Step::Back => {
+                        if !pick.asked {
+                            continue 'kinds;
+                        }
+                    }
                 }
             }
         }
@@ -1694,6 +1740,21 @@ mod back_chain_tests {
         // the same profile is offered twice in the ranking.
         let sites = distinct_sites(&[job("tiktok"), job("instagram"), job("tiktok")]);
         assert_eq!(sites, vec!["instagram".to_string(), "tiktok".to_string()]);
+    }
+
+    #[test]
+    fn the_cookie_question_only_exists_when_it_was_shown() {
+        use super::should_ask_cookies;
+        // Without a TTY there is nobody to answer, and with no stored profile
+        // there is nothing to choose. A step back aimed at a question that was
+        // never shown lands on the same preview, which is the bug this guards.
+        assert!(!should_ask_cookies(false, 0), "no TTY, no profiles");
+        assert!(
+            !should_ask_cookies(true, 0),
+            "no profiles means nothing to ask about"
+        );
+        assert!(!should_ask_cookies(false, 3), "a pipe cannot answer");
+        assert!(should_ask_cookies(true, 1), "a TTY with a profile asks");
     }
 
     #[test]
