@@ -143,6 +143,45 @@ fn row_prefix(mode: Mode, is_cursor: bool, is_checked: bool) -> String {
 
 // ─── TUI ────────────────────────────────────────────────────────────────────
 
+/// Decide what leaving the browser means, given how the loop ended.
+///
+/// Split out from the event loop so every combination is testable without a
+/// TTY. This logic is the difference between "my selection was accepted" and
+/// "the flow was abandoned", so it must not be reachable only by pressing real
+/// keys.
+fn outcome_for(
+    confirmed: bool,
+    went_back: bool,
+    abandoned: bool,
+    mode: Mode,
+    cursor: usize,
+    checked: &[bool],
+) -> Outcome {
+    if abandoned {
+        return Outcome::Abandoned;
+    }
+    if went_back {
+        return Outcome::Back;
+    }
+    if confirmed {
+        return match mode {
+            Mode::Single => Outcome::Picked(cursor),
+            Mode::Multi => Outcome::Toggled(
+                checked
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, v)| v.then_some(i))
+                    .collect(),
+            ),
+        };
+    }
+    // No key ever settled the loop (no TTY, empty list): nothing was chosen.
+    match mode {
+        Mode::Single => Outcome::Quit,
+        Mode::Multi => Outcome::Toggled(vec![]),
+    }
+}
+
 fn run_browser(
     title: &str,
     entries: &[Entry],
@@ -294,32 +333,80 @@ fn run_browser(
 
     drop(guard);
 
-    if abandoned {
-        return Outcome::Abandoned;
-    }
-    if went_back {
-        return Outcome::Back;
-    }
-    if !confirmed {
-        match mode {
-            Mode::Single => return Outcome::Picked(cursor),
-            Mode::Multi => {
-                let picked = checked
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, v)| v.then_some(i))
-                    .collect();
-                return Outcome::Toggled(picked);
-            }
-        }
-    }
-    fallback()
+    outcome_for(confirmed, went_back, abandoned, mode, cursor, &checked)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// Enter must accept the selection. This is the regression guard for an
+    /// inverted condition that made Enter fall through to the "nothing chosen"
+    /// fallback, so every confirmation abandoned the flow — Enter behaved
+    /// exactly like Esc.
+    #[test]
+    fn enter_accepts_the_selection_in_single_mode() {
+        assert_eq!(
+            outcome_for(true, false, false, Mode::Single, 2, &[false; 3]),
+            Outcome::Picked(2)
+        );
+    }
+
+    #[test]
+    fn enter_returns_the_checked_items_in_multi_mode() {
+        let checked = [false, true, false, true];
+        assert_eq!(
+            outcome_for(true, false, false, Mode::Multi, 0, &checked),
+            Outcome::Toggled(vec![1, 3])
+        );
+    }
+
+    #[test]
+    fn esc_steps_back_without_consuming_the_selection() {
+        let checked = [true, false];
+        assert_eq!(
+            outcome_for(false, true, false, Mode::Single, 1, &checked),
+            Outcome::Back
+        );
+        assert_eq!(
+            outcome_for(false, true, false, Mode::Multi, 0, &checked),
+            Outcome::Back,
+            "Esc is 'go back', not 'choose nothing'"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_abandons_rather_than_stepping_back() {
+        assert_eq!(
+            outcome_for(false, false, true, Mode::Single, 0, &[false; 2]),
+            Outcome::Abandoned
+        );
+    }
+
+    /// An unsettled loop means the screen was never usable, so no selection
+    /// happened — distinct from a confirmed empty multi-select.
+    #[test]
+    fn unsettled_loop_yields_no_selection() {
+        assert_eq!(
+            outcome_for(false, false, false, Mode::Single, 1, &[false; 2]),
+            Outcome::Quit
+        );
+        assert_eq!(
+            outcome_for(false, false, false, Mode::Multi, 0, &[false; 2]),
+            Outcome::Toggled(vec![])
+        );
+    }
+
+    /// Ctrl+C wins over a simultaneous Back, since abandoning is the stronger
+    /// signal and the loop can end on both.
+    #[test]
+    fn abandon_takes_precedence_over_back() {
+        assert_eq!(
+            outcome_for(false, true, true, Mode::Single, 0, &[false]),
+            Outcome::Abandoned
+        );
+    }
 
     #[test]
     fn toggles_are_local_and_all_flips_both_ways() {
