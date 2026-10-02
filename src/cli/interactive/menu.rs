@@ -138,6 +138,182 @@ fn pick_multi_inner(
     }
 }
 
+type BoxedBackend = ratatui::backend::CrosstermBackend<std::io::Stdout>;
+
+/// Shared chrome for the boxed prompts: border, title and help line.
+///
+/// `input_text` and `confirm` render through this so a confirmation looks like
+/// the rest of the app instead of dropping into a bare inquire prompt.
+struct BoxedPrompt {
+    title: String,
+    terminal: ratatui::Terminal<BoxedBackend>,
+    guard: crate::ui::dashboard::TerminalGuard,
+}
+
+impl BoxedPrompt {
+    fn enter(context: &str) -> Result<Self, ()> {
+        use crate::ui::dashboard::TerminalGuard;
+        let guard = TerminalGuard::enter().map_err(|_| ())?;
+        let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
+        let terminal = ratatui::Terminal::new(backend).map_err(|_| ())?;
+        Ok(Self {
+            title: chrome_title(context),
+            terminal,
+            guard,
+        })
+    }
+}
+
+/// Draw `body` inside the bordered box, with `help` pinned at the bottom.
+fn draw_boxed(
+    title: &str,
+    terminal: &mut ratatui::Terminal<BoxedBackend>,
+    body: Vec<ratatui::text::Line<'_>>,
+    help: &str,
+) -> std::io::Result<()> {
+    {
+        use ratatui::{
+            layout::{Constraint, Layout},
+            style::{Color, Style},
+            widgets::{Block, Paragraph},
+        };
+        terminal.draw(|f| {
+            let area = f.area();
+            let block = Block::bordered()
+                .border_set(ratatui::symbols::border::ROUNDED)
+                .title(format!(" {title} "));
+            let inner = block.inner(area);
+            f.render_widget(block, area);
+            let chunks = Layout::vertical([
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(if help.is_empty() { 0 } else { 1 }),
+            ])
+            .split(inner);
+            f.render_widget(Paragraph::new(body), chunks[0]);
+            if !help.is_empty() {
+                f.render_widget(
+                    Paragraph::new(ratatui::text::Line::styled(
+                        help,
+                        Style::default().fg(Color::DarkGray),
+                    ))
+                    .wrap(ratatui::widgets::Wrap { trim: true }),
+                    chunks[2],
+                );
+            }
+        })?;
+        Ok(())
+    }
+}
+
+/// What a key press means on a yes/no question.
+///
+/// Split out from the event loop so every case is testable without a TTY, the
+/// same reasoning that `browser::outcome_for` follows. `None` means the key is
+/// not an answer and the question stays open — important for destructive
+/// prompts, where a stray key must never be read as consent.
+fn confirm_key(key: crossterm::event::KeyCode, destructive: bool) -> Option<Step<bool>> {
+    use crossterm::event::KeyCode;
+    match key {
+        // Enter takes the safe path: yes normally, no when destructive.
+        KeyCode::Enter => Some(Step::Value(!destructive)),
+        // The explicit letters only exist where consent is not the default.
+        // An ordinary question is one Enter away, so keeping `y`/`n` there
+        // would only offer a second way to reach the same answer.
+        KeyCode::Char('y' | 'Y') if destructive => Some(Step::Value(true)),
+        KeyCode::Char('n' | 'N') if destructive => Some(Step::Value(false)),
+        KeyCode::Esc => Some(Step::Back),
+        _ => None,
+    }
+}
+
+/// Ask a yes/no question inside the app's chrome.
+///
+/// `Enter` confirms: for an ordinary question that means yes, which keeps the
+/// common path to a single keystroke. A `destructive` question is the exception
+/// — `Enter` means *no* there, and confirming needs an explicit `y`, so a
+/// stray Enter cannot delete a profile or a site file.
+///
+/// `Esc` steps back, matching every other prompt.
+pub fn confirm_back(context: &str, prompt: &str, default: bool, destructive: bool) -> Step<bool> {
+    confirm_box(context, prompt, &[], default, destructive)
+}
+
+/// As [`confirm_back`], but also shows `lines` above the question — used for
+/// the scrape preview so the summary and the decision share one box.
+pub fn confirm_box(
+    context: &str,
+    prompt: &str,
+    lines: &[String],
+    default: bool,
+    destructive: bool,
+) -> Step<bool> {
+    use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+
+    let help = if destructive {
+        // Enter always answers "no" here, so the hint spells out `y`.
+        "⏎ no · y yes · n no · esc back"
+    } else {
+        "⏎ yes · esc back"
+    };
+
+    let mut boxed = match BoxedPrompt::enter(context) {
+        Ok(b) => b,
+        // No TTY: keep the previous inquire behaviour so scripts still work.
+        Err(_) => {
+            return match inquire::Confirm::new(prompt).with_default(default).prompt() {
+                Ok(v) => Step::Value(v),
+                Err(_) => Step::Cancel,
+            };
+        }
+    };
+    // Split the borrow: `title` is read while `terminal` is drawn.
+    let BoxedPrompt {
+        title,
+        terminal,
+        guard: _guard,
+    } = &mut boxed;
+
+    loop {
+        let mut body: Vec<ratatui::text::Line<'_>> = Vec::new();
+        for line in lines {
+            body.push(ratatui::text::Line::raw(line.clone()));
+        }
+        if !body.is_empty() {
+            body.push(ratatui::text::Line::raw(String::new()));
+        }
+        body.push(ratatui::text::Line::styled(
+            format!("◆ {prompt}"),
+            ratatui::style::Style::default().fg(ratatui::style::Color::Magenta),
+        ));
+        if draw_boxed(title, terminal, body, help).is_err() {
+            break;
+        }
+
+        if !crossterm::event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
+            continue;
+        }
+        let Ok(Event::Key(key)) = crossterm::event::read() else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        // Ctrl+C is checked before the match so it wins over any character.
+        if matches!(key.code, KeyCode::Char('c' | 'C'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            // `boxed` owns the guard; dropping it here restores the terminal.
+            return Step::Cancel;
+        }
+        let Some(result) = confirm_key(key.code, destructive) else {
+            continue;
+        };
+        return result;
+    }
+    Step::Cancel
+}
+
 /// Convenience for simple string options without details pane.
 pub fn pick_single_labels(context: &str, labels: Vec<String>) -> Option<usize> {
     let opts = labels.into_iter().map(|l| (l, Vec::new())).collect();
@@ -388,7 +564,8 @@ pub fn ask_nonempty(context: &str, prompt: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Step, chrome_title, key_hint};
+    use super::{Step, chrome_title, confirm_key, key_hint};
+    use crossterm::event::KeyCode;
 
     #[test]
     fn step_separates_back_from_cancel() {
@@ -411,6 +588,72 @@ mod tests {
     fn hint_advertises_back_only_when_supported() {
         assert!(key_hint(true).contains("esc back"));
         assert!(!key_hint(false).contains("back"));
+    }
+
+    // ─── Yes/no confirmation ───────────────────────────────────────────────
+
+    /// Enter is the fast path: one keystroke to continue. This is what the
+    /// scrape preview depends on.
+    #[test]
+    fn enter_confirms_yes_for_an_ordinary_question() {
+        assert_eq!(
+            confirm_key(crossterm::event::KeyCode::Enter, false),
+            Some(Step::Value(true))
+        );
+    }
+
+    /// A stray Enter must never delete anything: destructive questions read
+    /// Enter as "no" and require an explicit `y`.
+    #[test]
+    fn enter_cancels_a_destructive_question() {
+        assert_eq!(
+            confirm_key(crossterm::event::KeyCode::Enter, true),
+            Some(Step::Value(false))
+        );
+    }
+
+    #[test]
+    fn destructive_questions_still_allow_an_explicit_yes() {
+        // `y` is the only way to say yes to a deletion.
+        assert_eq!(
+            confirm_key(KeyCode::Char('y'), true),
+            Some(Step::Value(true))
+        );
+        assert_eq!(
+            confirm_key(KeyCode::Char('Y'), true),
+            Some(Step::Value(true))
+        );
+    }
+
+    #[test]
+    fn n_is_an_escape_from_a_destructive_question() {
+        assert_eq!(
+            confirm_key(KeyCode::Char('n'), true),
+            Some(Step::Value(false))
+        );
+    }
+
+    #[test]
+    fn esc_steps_back_rather_than_answering() {
+        assert_eq!(confirm_key(KeyCode::Esc, false), Some(Step::Back));
+        assert_eq!(confirm_key(KeyCode::Esc, true), Some(Step::Back));
+    }
+
+    /// Keys that mean nothing here must not answer the question — otherwise a
+    /// stray letter could delete a profile.
+    #[test]
+    fn ordinary_questions_have_one_answer_key() {
+        // `y`/`n` only exist where consent is not the default; on an ordinary
+        // question Enter already answers it, so the letters must stay inert.
+        assert_eq!(confirm_key(KeyCode::Char('y'), false), None);
+        assert_eq!(confirm_key(KeyCode::Char('n'), false), None);
+    }
+
+    #[test]
+    fn unrelated_keys_are_ignored() {
+        assert_eq!(confirm_key(KeyCode::Char('x'), true), None);
+        assert_eq!(confirm_key(KeyCode::Left, false), None);
+        assert_eq!(confirm_key(KeyCode::Tab, true), None);
     }
 
     #[test]

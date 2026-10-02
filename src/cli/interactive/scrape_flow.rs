@@ -153,29 +153,48 @@ pub(super) fn preview_and_execute(
         println!("ℹ No content selected");
         return;
     }
-    println!("✔ Ready — {} job(s):", requests.len());
+    // The summary and the decision share one box, so the confirmation looks
+    // like the rest of the app instead of dropping out of it. Without a TTY the
+    // plain lines are kept, which is what scripts and CI rely on.
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let mut summary: Vec<String> = vec![format!("✔ Ready — {} job(s):", requests.len())];
     for (i, (req, site, username, kinds_desc)) in requests.iter().enumerate() {
         let out = req
             .output
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| cfg.general.output_dir.display().to_string());
-        println!(
-            "  {}. {}:{} → {kinds_desc} → {}",
-            i + 1,
-            site,
-            username,
-            out
-        );
+        summary.push(format!("  {}. {site}:{username} → {kinds_desc}", i + 1));
+        summary.push(format!("     → {out}"));
         // Surface the session each job will actually use, so a wrong cookie
         // profile is visible here rather than discovered after the download.
-        println!("      session: {}", describe_cookie_source(req));
+        summary.push(format!("     session: {}", describe_cookie_source(req)));
     }
-    let proceed = Confirm::new("Proceed?")
-        .with_render_config(super::theme::render_config())
-        .with_default(false)
-        .prompt();
-    if !proceed.unwrap_or(false) {
+
+    let proceed = if tty {
+        // Enter is the fast path: the expected action is to continue.
+        match crate::cli::interactive::menu::confirm_box(
+            "Download content",
+            "Proceed?",
+            &summary,
+            true,
+            false,
+        ) {
+            Step::Value(v) => v,
+            // Esc steps back; nothing is queued yet, so leave the flow.
+            Step::Back | Step::Cancel => return,
+        }
+    } else {
+        for line in &summary {
+            println!("{line}");
+        }
+        Confirm::new("Proceed?")
+            .with_render_config(super::theme::render_config())
+            .with_default(false)
+            .prompt()
+            .unwrap_or(false)
+    };
+    if !proceed {
         println!("canceled");
         return;
     }
@@ -222,7 +241,6 @@ pub(super) fn preview_and_execute(
     }
 
     let total = requests.len();
-    let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
 
     // TTY: batch runs inside the ratatui dashboard (alternate screen).
     if tty {

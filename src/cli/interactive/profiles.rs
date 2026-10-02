@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use inquire::{Confirm, Text};
+use inquire::Text;
 
 use crate::application::scraper::{ScrapeRequest, validate_url};
 use crate::config;
@@ -166,11 +166,16 @@ pub(super) fn prompt_scrape_as_profile() {
         // 2+ accounts of the same menu-capable site — offer the shortcut
         let site = &selected[0].0.clone();
         let options = content_options(site);
-        let same_for_all = Confirm::new("Apply the same content selection to all accounts?")
-            .with_render_config(render_config())
-            .with_default(true)
-            .prompt()
-            .unwrap_or(true);
+        // Enter says yes: applying one choice to every account is the expected
+        // action, and nothing is destroyed here.
+        let same_for_all = crate::cli::interactive::menu::confirm_back(
+            "Add account",
+            "Apply the same content selection to all accounts?",
+            true,
+            false,
+        )
+        .value()
+        .unwrap_or(true);
         if same_for_all {
             let opts: Vec<(String, Vec<String>)> = options
                 .iter()
@@ -471,10 +476,14 @@ pub(super) fn prompt_new_profile_accounts(name: &str) -> crate::config::Profile 
                 extra_args: Vec::new(),
             });
 
-        let more = Confirm::new("Add another account?")
-            .with_default(false)
-            .prompt()
-            .unwrap_or(false);
+        let more = crate::cli::interactive::menu::confirm_back(
+            "Add account",
+            "Add another account?",
+            false,
+            false,
+        )
+        .value()
+        .unwrap_or(false);
         if !more {
             break;
         }
@@ -536,9 +545,12 @@ pub(super) fn edit_profile_menu(name: &str, path: &Path) {
             eprintln!("error: profile TOML parse failed: {e}");
             eprintln!("  help: use Advanced → $EDITOR to fix the syntax manually");
             // Only escape hatch available on corrupt data
-            let _ = Confirm::new("Open in $EDITOR now?")
-                .with_default(true)
-                .prompt();
+            let _ = crate::cli::interactive::menu::confirm_back(
+                "Manage Profiles",
+                "Open in $EDITOR now?",
+                true,
+                false,
+            );
             if let Some(editor) = std::env::var("EDITOR")
                 .ok()
                 .or_else(|| std::env::var("VISUAL").ok())
@@ -593,10 +605,15 @@ pub(super) fn edit_profile_menu(name: &str, path: &Path) {
         match choice {
             "Back" => return,
             "Delete profile" => {
-                if Confirm::new(&format!("Delete profile '{name}' and its .toml?"))
-                    .with_default(false)
-                    .prompt()
-                    .unwrap_or(false)
+                // Destructive: Enter keeps the profile, `y` deletes it.
+                if crate::cli::interactive::menu::confirm_back(
+                    "Manage Profiles",
+                    &format!("Delete profile '{name}' and its .toml?"),
+                    false,
+                    true,
+                )
+                .value()
+                .unwrap_or(false)
                 {
                     let _ = std::fs::remove_file(path);
                     println!("✔ Deleted profile {name}");
@@ -703,10 +720,15 @@ pub(super) fn edit_profile_menu(name: &str, path: &Path) {
                         Ok(c) => c,
                         Err(_) => continue,
                     };
-                if !Confirm::new(&format!("Remove {picked}?"))
-                    .with_default(false)
-                    .prompt()
-                    .unwrap_or(false)
+                // Destructive: Enter keeps the account, `y` removes it.
+                if !crate::cli::interactive::menu::confirm_back(
+                    "Manage Profiles",
+                    &format!("Remove {picked}?"),
+                    false,
+                    true,
+                )
+                .value()
+                .unwrap_or(false)
                 {
                     continue;
                 }
