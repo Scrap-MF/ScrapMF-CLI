@@ -34,6 +34,17 @@ impl<T> Step<T> {
     pub fn is_back(&self) -> bool {
         matches!(self, Step::Back)
     }
+
+    /// Convert the value, keeping `Back` and `Cancel` untouched. Used where a
+    /// question's `T` is not the shape the caller wants, e.g. a `bool` answer
+    /// that only matters as "go again or not".
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> Step<U> {
+        match self {
+            Step::Value(v) => Step::Value(f(v)),
+            Step::Back => Step::Back,
+            Step::Cancel => Step::Cancel,
+        }
+    }
 }
 
 /// Hint line describing the keys, shown in prompts that support going back.
@@ -641,6 +652,19 @@ mod tests {
 
     /// Keys that mean nothing here must not answer the question — otherwise a
     /// stray letter could delete a profile.
+    #[test]
+    fn map_converts_the_value_and_keeps_the_way_out() {
+        assert_eq!(Step::Value(2).map(|n| n * 2), Step::Value(4));
+        // Backing out must survive the conversion, otherwise the caller loses
+        // the only signal that the user wanted to go back.
+        assert_eq!(
+            Step::<u8>::Back.map(|n| n * 2),
+            Step::Back,
+            "Back is not a value"
+        );
+        assert_eq!(Step::<u8>::Cancel.map(|n| n * 2), Step::Cancel);
+    }
+
     #[test]
     fn ordinary_questions_have_one_answer_key() {
         // `y`/`n` only exist where consent is not the default; on an ordinary
