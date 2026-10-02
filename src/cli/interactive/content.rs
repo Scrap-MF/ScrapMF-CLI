@@ -194,7 +194,7 @@ pub(super) fn kinds_description(site: &str, kinds: &[ContentKind]) -> String {
     }
 }
 
-pub(super) fn prompt_content_kinds(site: &str, label: &str) -> Vec<ContentKind> {
+pub(super) fn prompt_content_kinds(site: &str, label: &str) -> menu::Step<Vec<ContentKind>> {
     let opts: Vec<(String, Vec<String>)> = content_options(site)
         .into_iter()
         .map(|k| {
@@ -215,20 +215,29 @@ pub(super) fn prompt_content_kinds(site: &str, label: &str) -> Vec<ContentKind> 
         })
         .collect();
     let context = format!("Content for {label}");
-    let Some(idxs) = menu::pick_multi(&context, opts.clone(), &[]) else {
-        return Vec::new();
+    // Esc steps back to the previous question instead of reading as
+    // "nothing selected", which is what made a mis-typed username look like a
+    // cancelled run.
+    let idxs = match menu::pick_multi_back(&context, opts.clone(), &[]) {
+        menu::Step::Value(v) => v,
+        menu::Step::Back => return menu::Step::Back,
+        menu::Step::Cancel => return menu::Step::Cancel,
     };
     let picked: Vec<String> = idxs
         .into_iter()
         .filter_map(|i| opts.get(i).map(|(l, _)| l.clone()))
         .collect();
+    // Confirming nothing is a legitimate answer; only Esc means "go back".
+    if picked.is_empty() {
+        return menu::Step::Value(Vec::new());
+    }
     if let Err(msg) = validate_kind_selection(&picked) {
         eprintln!("{msg}");
         std::thread::sleep(std::time::Duration::from_millis(800));
-        return Vec::new();
+        return menu::Step::Value(Vec::new());
     }
     tracing::debug!(site = %site, picked = ?picked, "content kinds selected");
-    resolve_kinds(site, &picked)
+    menu::Step::Value(resolve_kinds(site, &picked))
 }
 
 /// Preview + Confirm + sequential execution of built jobs.

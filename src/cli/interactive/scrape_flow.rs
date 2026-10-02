@@ -7,6 +7,7 @@ use crate::application::scraper::{ScrapeRequest, validate_url};
 use crate::config;
 
 use super::content::{ContentKind, build_tagged_urls, prompt_content_kinds, select_urls};
+use super::menu::Step;
 use super::select_menu;
 
 /// Decide which cookie source a run should use, after the user has chosen what
@@ -630,24 +631,35 @@ pub(super) fn auto_match_site_key(
 /// (profile page statusCode 10222), but their direct /video/<id> story
 /// links extract perfectly — so pasting links is the reliable route.
 pub(super) fn prompt_scrape_direct_urls() {
-    let Some(raw) = crate::cli::interactive::menu::input_text(
-        "Download content ─ URL(s)",
-        "Paste URL(s) — separate with spaces or commas:",
-        "https://www.tiktok.com/@user/video/123 https://www.instagram.com/reel/xyz/",
-        "each URL is matched against your sites/*.toml patterns",
-    ) else {
-        println!("canceled");
-        return;
+    // Re-ask with the previous text pre-filled: one bad URL in a batch should
+    // mean fixing that one, not starting over.
+    let mut previous = String::new();
+    let (urls, _errors) = loop {
+        let raw = match crate::cli::interactive::menu::input_text_back(
+            "Download content ─ URL(s)",
+            "Paste URL(s) — separate with spaces or commas:",
+            "https://www.tiktok.com/@user/video/123 https://www.instagram.com/reel/xyz/",
+            "each URL is matched against your sites/*.toml patterns",
+            &previous,
+        ) {
+            Step::Value(v) => v,
+            // First question of this flow: Esc leaves.
+            Step::Back | Step::Cancel => {
+                println!("canceled");
+                return;
+            }
+        };
+        let (urls, errors) = parse_pasted_urls(&raw);
+        for e in &errors {
+            println!("⚠ skipped invalid URL — {e}");
+        }
+        if urls.is_empty() {
+            println!("ℹ No valid URLs — Esc to cancel");
+            previous = raw;
+            continue;
+        }
+        break (urls, errors);
     };
-
-    let (urls, errors) = parse_pasted_urls(&raw);
-    for e in &errors {
-        println!("⚠ skipped invalid URL — {e}");
-    }
-    if urls.is_empty() {
-        println!("ℹ No valid URLs");
-        return;
-    }
 
     let cfg = config::load().unwrap_or_default();
     let mut jobs = Vec::new();
@@ -776,6 +788,29 @@ pub(super) fn site_options_with_fallbacks(fallbacks: &[&str]) -> Vec<String> {
     opts
 }
 
+/// Ask for the account to scrape. Returns `None` when the user steps back, in
+/// which case the caller shows the previous question again; `initial` carries
+/// whatever was typed before so only the wrong part has to be corrected.
+fn username_prompt(site: &str, initial: &str) -> Option<String> {
+    let prompt = if site == "facebook" {
+        "ID o URL del perfil (ej. 123..., https://www.facebook.com/profile.php?id=...):"
+    } else if site == "instagram" {
+        "Username or ID (without @):"
+    } else {
+        "Username (without @):"
+    };
+    match crate::cli::interactive::menu::input_text_back(
+        &format!("Download content ─ {site}"),
+        prompt,
+        "someuser",
+        "",
+        initial,
+    ) {
+        Step::Value(v) => Some(v.trim().trim_start_matches('@').to_string()),
+        Step::Back | Step::Cancel => None,
+    }
+}
+
 pub(super) fn prompt_quick_scrape() {
     let cfg = config::load().unwrap_or_default();
 
@@ -784,45 +819,75 @@ pub(super) fn prompt_quick_scrape() {
         site_options_with_fallbacks(&["instagram", "tiktok", "twitter", "vsco", "facebook"]);
 
     // Decorated Browser with fixed chrome `╭ SCRAPMF v1.7.0 ─ Download content ─╮`
-    let opts: Vec<(String, Vec<String>)> = site_opts
-        .iter()
-        .map(|k| {
-            let spec = crate::sites::registry::find_by_id(k);
-            let details = if let Some(s) = spec {
-                vec![
-                    format!("pattern: {}", s.patterns.join(", ")),
-                    format!("backend: {:?}", s.backend),
-                    format!("kinds: {}", s.content_kinds.join(", ")),
-                ]
-            } else {
-                vec!["custom site (sites/*.toml)".to_string()]
-            };
-            (crate::cli::interactive::theme::brand_site_label(k), details)
-        })
-        .collect();
-    let Some(idx) = crate::cli::interactive::menu::pick_single("Download content", opts) else {
-        return;
+    // Rebuilt whenever the flow returns to this question.
+    let site_opts_ui = |site_opts: &[String]| -> Vec<(String, Vec<String>)> {
+        site_opts
+            .iter()
+            .map(|k| {
+                let spec = crate::sites::registry::find_by_id(k);
+                let details = if let Some(s) = spec {
+                    vec![
+                        format!("pattern: {}", s.patterns.join(", ")),
+                        format!("backend: {:?}", s.backend),
+                        format!("kinds: {}", s.content_kinds.join(", ")),
+                    ]
+                } else {
+                    vec!["custom site (sites/*.toml)".to_string()]
+                };
+                (crate::cli::interactive::theme::brand_site_label(k), details)
+            })
+            .collect()
     };
-    let site_name = site_opts[idx].clone();
-    let prompt_text = if site_name == "facebook" {
-        "ID o URL del perfil (ej. 123..., https://www.facebook.com/profile.php?id=...):"
-    } else if site_name == "instagram" {
-        "Username or ID (without @):"
-    } else {
-        "Username (without @):"
+
+    // site ⇄ username ⇄ content. Esc steps back one question instead of
+    // discarding the run, and the username is kept so a typo is corrected in
+    // place rather than retyped.
+    let mut username_answer = String::new();
+    let (site_name, raw_input, kinds) = loop {
+        let site_name = loop {
+            // Rebuilt each time so a step back re-renders the full list.
+            let site_list = site_opts_ui(&site_opts);
+            let idx =
+                match crate::cli::interactive::menu::pick_single("Download content", site_list) {
+                    Step::Value(i) => i,
+                    // First question of the flow: Esc leaves.
+                    Step::Back | Step::Cancel => return,
+                };
+            let site = site_opts[idx].clone();
+            match username_prompt(&site, &username_answer) {
+                Some(typed) => {
+                    username_answer = typed;
+                    break site;
+                }
+                // Esc at the username returns to the site list.
+                None => {
+                    continue;
+                }
+            }
+        };
+
+        let raw_input = username_answer.clone();
+        match prompt_content_kinds(
+            &site_name,
+            &super::theme::brand_account_label(&format!("{site_name}:{raw_input}")),
+        ) {
+            Step::Value(k) if k.is_empty() => {
+                println!("ℹ No content selected");
+                return;
+            }
+            Step::Value(k) => break (site_name, raw_input, k),
+            // Esc at content returns to the username, keeping its text.
+            Step::Back => match username_prompt(&site_name, &username_answer) {
+                Some(typed) => username_answer = typed,
+                // Esc again steps back to the site list.
+                None => {
+                    continue;
+                }
+            },
+            Step::Cancel => return,
+        }
     };
-    let raw_input = match crate::cli::interactive::menu::input_text(
-        &format!("Download content ─ {site_name}"),
-        prompt_text,
-        "someuser",
-        "",
-    )
-    .map(|s| s.trim().to_string())
-    .filter(|s| !s.is_empty())
-    {
-        Some(s) => s,
-        None => return,
-    };
+    let raw_input = raw_input.clone();
     // Facebook: accept ID or full profile URL (profile.php?id=, people/Name/ID, fb.com, etc.)
     // Instagram: accept ID (7-19 digits) as before. Both resolve ID → username.
     let (raw_is_id, raw_id, display_for_menu) = if site_name == "instagram"
@@ -863,14 +928,6 @@ pub(super) fn prompt_quick_scrape() {
     };
 
     // Content menu — same cycle as username (choose content before cookies/resolve)
-    let kinds = prompt_content_kinds(
-        &site_name,
-        &super::theme::brand_account_label(&format!("{site_name}:{display_for_menu}")),
-    );
-    if kinds.is_empty() {
-        println!("ℹ No content selected");
-        return;
-    }
 
     // Site config (raw, not yet baked with username)
     let site_cfg = cfg.sites.get(site_name.as_str()).cloned();

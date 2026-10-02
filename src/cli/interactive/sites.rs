@@ -135,10 +135,12 @@ fn general_settings_menu() {
                 (o.clone(), details)
             })
             .collect();
-        let Some(idx) =
-            crate::cli::interactive::menu::pick_single("Configuration ─ General settings", opts)
-        else {
-            return;
+        let idx = match crate::cli::interactive::menu::pick_single(
+            "Configuration ─ General settings",
+            opts,
+        ) {
+            crate::cli::interactive::menu::Step::Value(i) => i,
+            _ => return,
         };
         let choice = options[idx].clone();
         if choice.starts_with("Output directory:") {
@@ -245,14 +247,15 @@ fn capture_browser_options() -> Vec<String> {
 fn create_profile_wizard() {
     use crate::config::cookies;
     let browsers = capture_browser_options();
-    let Some(b_idx) = crate::cli::interactive::menu::pick_single(
+    let b_idx = match crate::cli::interactive::menu::pick_single(
         "Configuration ─ Cookie capture ─ Browser",
         browsers
             .iter()
             .map(|b| (b.clone(), vec![format!("capture from {b}")]))
             .collect(),
-    ) else {
-        return;
+    ) {
+        crate::cli::interactive::menu::Step::Value(i) => i,
+        _ => return,
     };
     let browser = browsers[b_idx].clone();
 
@@ -280,12 +283,13 @@ fn create_profile_wizard() {
         }));
         v
     };
-    let Some(picked_idxs) = crate::cli::interactive::menu::pick_multi(
+    let picked_idxs = match crate::cli::interactive::menu::pick_multi(
         "Configuration ─ Cookie capture ─ Networks",
         net_opts.clone(),
         &[],
-    ) else {
-        return;
+    ) {
+        crate::cli::interactive::menu::Step::Value(v) => v,
+        _ => return,
     };
     let picked_raw: Vec<String> = picked_idxs
         .into_iter()

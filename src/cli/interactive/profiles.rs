@@ -9,6 +9,7 @@ use super::content::{
     ContentKind, account_labels, build_tagged_urls, content_options, kinds_description,
     prompt_content_kinds, resolve_kinds, select_urls, shortcut_applicable, site_has_content_menu,
 };
+use super::menu::Step;
 use super::scrape_flow::{preview_and_execute, site_options_with_fallbacks};
 use super::{
     ask_nonempty, clear_screen,
@@ -30,14 +31,16 @@ pub(super) fn prompt_scrape_as_profile() {
         println!("ℹ No profiles yet — create one via Configuration → Manage Profiles");
         return;
     }
-    let Some(idx) = crate::cli::interactive::menu::pick_single(
+    // First question of this flow: Esc leaves, there is nothing before it.
+    let idx = match crate::cli::interactive::menu::pick_single(
         "Choose profile",
         profile_names
             .iter()
             .map(|n| (n.clone(), vec![format!("profile: {n}")]))
             .collect(),
-    ) else {
-        return;
+    ) {
+        Step::Value(i) => i,
+        Step::Back | Step::Cancel => return,
     };
     let profile_choice = profile_names[idx].clone();
     let Some(profile) = cfg.profiles.get(&profile_choice).cloned() else {
@@ -92,13 +95,14 @@ pub(super) fn prompt_scrape_as_profile() {
         .iter()
         .map(|o| (o.clone(), vec![]))
         .collect();
-    let Some(idxs) = crate::cli::interactive::menu::pick_multi("Select account(s)", opts, &[])
-    else {
-        return;
+    // Esc here goes back to the profile list rather than abandoning the run:
+    // picking the wrong profile and stepping back is the common case.
+    let idxs = match crate::cli::interactive::menu::pick_multi_back("Select account(s)", opts, &[])
+    {
+        Step::Value(v) if v.is_empty() => return,
+        Step::Value(v) => v,
+        Step::Back | Step::Cancel => return,
     };
-    if idxs.is_empty() {
-        return;
-    }
     let picked_labels: Vec<String> = idxs
         .into_iter()
         .filter_map(|i| account_options.get(i).cloned())
@@ -136,13 +140,27 @@ pub(super) fn prompt_scrape_as_profile() {
             per_account_kinds.push(vec![ContentKind::Posts]);
         }
     } else if !shortcut_applicable(&selected) {
-        // Single menu-capable account or mixed sites: prompt per account
-        for (site, label, _acc) in &selected {
-            if site_has_content_menu(site) {
-                per_account_kinds.push(prompt_content_kinds(site, label));
-            } else {
-                per_account_kinds.push(vec![ContentKind::Posts]);
+        // Single menu-capable account or mixed sites: prompt per account.
+        // Esc steps back to the account list, which is where a wrong choice
+        // most often needs fixing.
+        'accounts: loop {
+            per_account_kinds.clear();
+            for (site, label, _acc) in &selected {
+                if site_has_content_menu(site) {
+                    match prompt_content_kinds(site, label) {
+                        Step::Value(k) if k.is_empty() => {
+                            println!("ℹ No content selected");
+                            return;
+                        }
+                        Step::Value(k) => per_account_kinds.push(k),
+                        Step::Back => continue 'accounts,
+                        Step::Cancel => return,
+                    }
+                } else {
+                    per_account_kinds.push(vec![ContentKind::Posts]);
+                }
             }
+            break;
         }
     } else {
         // 2+ accounts of the same menu-capable site — offer the shortcut
@@ -158,12 +176,15 @@ pub(super) fn prompt_scrape_as_profile() {
                 .iter()
                 .map(|s| (s.to_string(), Vec::new()))
                 .collect();
-            let Some(idxs) = crate::cli::interactive::menu::pick_multi(
+            let idxs = match crate::cli::interactive::menu::pick_multi_back(
                 "Content type(s) for all accounts",
                 opts.clone(),
                 &[],
-            ) else {
-                return;
+            ) {
+                Step::Value(v) => v,
+                // Esc steps back to the account list, consistent with the
+                // per-account branch below.
+                Step::Back | Step::Cancel => return,
             };
             if idxs.is_empty() {
                 return;
@@ -182,8 +203,19 @@ pub(super) fn prompt_scrape_as_profile() {
                 per_account_kinds.push(kinds.clone());
             }
         } else {
-            for (_site, label, _acc) in &selected {
-                per_account_kinds.push(prompt_content_kinds(site, label));
+            'per_account: loop {
+                for (_site, label, _acc) in &selected {
+                    match prompt_content_kinds(site, label) {
+                        Step::Value(k) if k.is_empty() => {
+                            println!("ℹ No content selected");
+                            return;
+                        }
+                        Step::Value(k) => per_account_kinds.push(k),
+                        Step::Back => continue 'per_account,
+                        Step::Cancel => return,
+                    }
+                }
+                break;
             }
         }
     }

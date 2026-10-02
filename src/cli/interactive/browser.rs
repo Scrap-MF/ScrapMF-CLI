@@ -47,7 +47,12 @@ pub enum Mode {
 pub enum Outcome {
     Picked(usize),
     Toggled(Vec<usize>),
+    /// The screen could not be used at all (no TTY, or too few entries).
     Quit,
+    /// Esc / q — go back to the previous question, keeping earlier answers.
+    Back,
+    /// Ctrl+C — abandon the whole flow.
+    Abandoned,
 }
 
 /// Fluent builder — see [`Browser::run`].
@@ -57,6 +62,7 @@ pub struct Browser {
     entries: Vec<Entry>,
     mode: Option<Mode>,
     checked: Vec<usize>,
+    hint: Option<String>,
 }
 
 impl Browser {
@@ -77,6 +83,13 @@ impl Browser {
         self
     }
 
+    /// Key hint rendered under the list, so a screen that steps back on Esc
+    /// says so instead of leaving the behaviour to be guessed.
+    pub fn hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
+
     /// Pre-checked indices (Multi only; ignored otherwise).
     // Used by the content-kinds / cookie-networks browsers (next phase).
     #[allow(dead_code)]
@@ -87,7 +100,13 @@ impl Browser {
 
     pub fn run(self) -> Outcome {
         let mode = self.mode.unwrap_or(Mode::Single);
-        run_browser(&self.title, &self.entries, mode, &self.checked)
+        run_browser(
+            &self.title,
+            &self.entries,
+            mode,
+            &self.checked,
+            self.hint.as_deref(),
+        )
     }
 }
 
@@ -124,7 +143,16 @@ fn row_prefix(mode: Mode, is_cursor: bool, is_checked: bool) -> String {
 
 // ─── TUI ────────────────────────────────────────────────────────────────────
 
-fn run_browser(title: &str, entries: &[Entry], mode: Mode, prechecked: &[usize]) -> Outcome {
+fn run_browser(
+    title: &str,
+    entries: &[Entry],
+    mode: Mode,
+    prechecked: &[usize],
+    hint: Option<&str>,
+) -> Outcome {
+    // A cancelled multi-select is an *empty* selection, not a quit: pressing
+    // Esc while picking kinds means "I chose none", which is a legitimate
+    // answer the caller must be able to distinguish from leaving the screen.
     let fallback = || match mode {
         Mode::Single => Outcome::Quit,
         Mode::Multi => Outcome::Toggled(vec![]),
@@ -150,7 +178,12 @@ fn run_browser(title: &str, entries: &[Entry], mode: Mode, prechecked: &[usize])
     }
     // Loop ends exactly once, via one of these:
     let mut confirmed = false;
-    let mut cancelled = false;
+    // Esc and Ctrl+C both leave the screen, but they mean different things to
+    // the caller: Esc steps back to the previous question, Ctrl+C abandons the
+    // whole flow. `Browser::run` therefore has to tell them apart, so the
+    // distinction is tracked separately instead of collapsing into `cancelled`.
+    let mut went_back = false;
+    let mut abandoned = false;
 
     let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
     let Ok(mut terminal) = ratatui::Terminal::new(backend) else {
@@ -159,7 +192,7 @@ fn run_browser(title: &str, entries: &[Entry], mode: Mode, prechecked: &[usize])
     };
 
     use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-    while !confirmed && !cancelled {
+    while !confirmed && !went_back && !abandoned {
         let _ = terminal.draw(|f| {
             let chunks = Layout::vertical([
                 Constraint::Percentage(52),
@@ -213,9 +246,15 @@ fn run_browser(title: &str, entries: &[Entry], mode: Mode, prechecked: &[usize])
             );
             f.render_widget(details, chunks[1]);
 
-            let hints = match mode {
-                Mode::Single => "↑↓ Navigate · Enter Select · q Cancel",
-                Mode::Multi => "↑↓ Move · Space Toggle · a All/None · Enter Confirm · q Cancel",
+            // An explicit hint from the caller wins, so a screen that steps back
+            // on Esc can advertise it; otherwise fall back to the per-mode text.
+            let hints = match hint {
+                Some(h) => h.to_string(),
+                None => match mode {
+                    Mode::Single => "↑↓ Navigate · Enter Select · q Cancel",
+                    Mode::Multi => "↑↓ Move · Space Toggle · a All/None · Enter Confirm · q Cancel",
+                }
+                .to_string(),
             };
             f.render_widget(Paragraph::new(hints), chunks[2]);
         });
@@ -245,17 +284,23 @@ fn run_browser(title: &str, entries: &[Entry], mode: Mode, prechecked: &[usize])
             KeyCode::Char(' ') if mode == Mode::Multi => {
                 toggle_at(&mut checked, cursor);
             }
-            KeyCode::Esc | KeyCode::Char('q' | 'Q') => cancelled = true,
+            KeyCode::Esc | KeyCode::Char('q' | 'Q') => went_back = true,
             _ => {}
         }
         if ctrl_c {
-            cancelled = true;
+            abandoned = true;
         }
     }
 
     drop(guard);
 
-    if !cancelled {
+    if abandoned {
+        return Outcome::Abandoned;
+    }
+    if went_back {
+        return Outcome::Back;
+    }
+    if !confirmed {
         match mode {
             Mode::Single => return Outcome::Picked(cursor),
             Mode::Multi => {
