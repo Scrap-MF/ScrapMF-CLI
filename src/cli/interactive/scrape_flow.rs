@@ -788,6 +788,17 @@ pub(super) fn site_options_with_fallbacks(fallbacks: &[&str]) -> Vec<String> {
     opts
 }
 
+/// Normalise what the user typed for a username: trim surrounding whitespace
+/// and nothing else.
+///
+/// A leading `@` is deliberately kept. It is stripped later, where the value is
+/// turned into a URL, and stripping it here made the text change under the user
+/// when a question was revisited — and reduced a lone `@` to an empty string,
+/// which the caller could not tell apart from no answer at all.
+pub(crate) fn username_prompt_value(raw: &str) -> String {
+    raw.trim().to_string()
+}
+
 /// Ask for the account to scrape. Returns `None` when the user steps back, in
 /// which case the caller shows the previous question again; `initial` carries
 /// whatever was typed before so only the wrong part has to be corrected.
@@ -806,7 +817,7 @@ fn username_prompt(site: &str, initial: &str) -> Option<String> {
         "",
         initial,
     ) {
-        Step::Value(v) => Some(v.trim().trim_start_matches('@').to_string()),
+        Step::Value(v) => Some(username_prompt_value(&v)),
         Step::Back | Step::Cancel => None,
     }
 }
@@ -854,16 +865,25 @@ pub(super) fn prompt_quick_scrape() {
                     Step::Back | Step::Cancel => return,
                 };
             let site = site_opts[idx].clone();
-            match username_prompt(&site, &username_answer) {
-                Some(typed) => {
-                    username_answer = typed;
-                    break site;
+            // Re-ask rather than treat a bare "@" as no answer: previously an
+            // input that normalised to empty looked like a step back, so the
+            // user was thrown out of the flow for a typo instead of fixing it.
+            let typed = loop {
+                match username_prompt(&site, &username_answer) {
+                    Some(t) if t.is_empty() => {
+                        println!("⚠ Enter a username");
+                        continue;
+                    }
+                    Some(t) => break t,
+                    None => break String::new(),
                 }
+            };
+            if typed.is_empty() {
                 // Esc at the username returns to the site list.
-                None => {
-                    continue;
-                }
+                continue;
             }
+            username_answer = typed;
+            break site;
         };
 
         let raw_input = username_answer.clone();
@@ -1527,5 +1547,28 @@ mod quick_flatten_tests {
             unknown_domains.is_empty(),
             "an empty site key must resolve to no domains, not all domains"
         );
+    }
+
+    // ─── Username normalisation ─────────────────────────────────────────────
+
+    /// The typed value round-trips apart from surrounding whitespace. Keeping
+    /// the `@` matters: it is stripped where the URL is built, and stripping
+    /// it here changed the text under the user on a revisit.
+    #[test]
+    fn username_keeps_the_at_sign_the_user_typed() {
+        use super::username_prompt_value;
+        assert_eq!(username_prompt_value("@user"), "@user");
+        assert_eq!(username_prompt_value("  @user  "), "@user");
+        assert_eq!(username_prompt_value("user"), "user");
+    }
+
+    /// A lone `@` must not collapse to "no answer", or a single stray
+    /// character would eject the user from the flow.
+    #[test]
+    fn a_lone_at_sign_is_not_an_empty_answer() {
+        use super::username_prompt_value;
+        assert!(!username_prompt_value("@").is_empty());
+        assert!(!username_prompt_value("   @   ").is_empty());
+        assert!(username_prompt_value("   ").is_empty());
     }
 }
