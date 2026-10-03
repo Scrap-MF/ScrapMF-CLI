@@ -15,8 +15,13 @@ changelog_update = false
 # attaches the compiled binaries. release-plz only pushes the tag.
 git_release_enable = false
 
-# Uniform branch names for release PRs: release-plz/v1.0.0, …
-pr_branch_prefix = "release-plz"
+# Branch name of the release PR: `release-plz-<timestamp>`. The trailing
+# hyphen is load-bearing — release-plz concatenates the prefix instead of
+# joining it, so "release-plz" produced branches like
+# `release-plz2026-10-03T05-31-05Z`, and release-plz recognises its own PRs by
+# `starts_with(prefix)` with no base-branch filter, so the prefix has to stay
+# unambiguous. Matches release-plz's own `DEFAULT_BRANCH_PREFIX`.
+pr_branch_prefix = "release-plz-"
 
 [[package]]
 name = "scrapmf"
