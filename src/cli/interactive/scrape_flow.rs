@@ -7,7 +7,41 @@ use crate::application::scraper::{ScrapeRequest, validate_url};
 use crate::config;
 
 use super::content::{ContentKind, build_tagged_urls, prompt_content_kinds, select_urls};
-use super::select_menu;
+use super::menu::Step;
+
+/// A job as the preview and the dashboard pass it around:
+/// `(request, site key, label shown in the UI, content description)`.
+pub(super) type ScrapeJob = (ScrapeRequest, String, String, String);
+
+/// The session chosen for this run, and whether the question was shown at all.
+///
+/// `asked` exists because this question is conditional: with no stored
+/// profiles there is nothing to ask, so a step back aimed at it would be a
+/// no-op that lands the user on the same preview they just left.
+pub(super) struct CookiePick {
+    /// The chosen cookie profile, or `None` to keep the site defaults.
+    pub file: Option<PathBuf>,
+    /// False when the question was skipped, so there is nothing to go back to.
+    pub asked: bool,
+}
+
+impl CookiePick {
+    fn skipped() -> Self {
+        Self {
+            file: None,
+            asked: false,
+        }
+    }
+}
+
+/// Whether the cookie question has to be shown.
+///
+/// Both conditions matter. Without a TTY there is nobody to answer, and
+/// without a stored profile there is nothing to choose between the defaults
+/// and.
+fn should_ask_cookies(is_tty: bool, profile_count: usize) -> bool {
+    is_tty && profile_count > 0
+}
 
 /// Decide which cookie source a run should use, after the user has chosen what
 /// to scrape.
@@ -19,18 +53,27 @@ use super::select_menu;
 ///
 /// Behaviour:
 ///
-/// * **no stored profiles** — return `None` without prompting, so a first-time
+/// * **not a TTY, or no stored profiles** — do not prompt, so a first-time
 ///   user goes straight to the site defaults with no extra keystroke;
 /// * **at least one stored profile** — always ask, offering the site default
 ///   alongside the created profiles, so the choice is always explicit.
 ///
-/// Cancelling or pressing Esc means "use the site default", never "abort".
-pub(super) fn prompt_cookie_override(sites: &[String]) -> Option<PathBuf> {
+/// `Step::Back` on Esc returns to the previous question of the flow, and
+/// `Step::Cancel` on Ctrl+C leaves the run. "Use the site default" stays a
+/// single keystroke: it is the first option, which Enter selects.
+pub(super) fn prompt_cookie_override(sites: &[String]) -> Step<CookiePick> {
     use crate::config::cookies;
 
+    // The TTY check lives here rather than at each call site: `asked` has to be
+    // authoritative, and a caller that forgets the guard would otherwise claim
+    // the user saw a question they never did.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        return Step::Value(CookiePick::skipped());
+    }
+
     let profiles = cookies::list_profiles();
-    if profiles.is_empty() {
-        return None;
+    if !should_ask_cookies(true, profiles.len()) {
+        return Step::Value(CookiePick::skipped());
     }
 
     // Rank profiles that actually carry cookies for these sites first. When no
@@ -67,21 +110,34 @@ pub(super) fn prompt_cookie_override(sites: &[String]) -> Option<PathBuf> {
     } else {
         "No stored profile has cookies for this site. Cookies for this run?"
     };
-    let Ok(choice) = select_menu(title, opts.clone()).prompt() else {
-        // Esc / Ctrl+C: keep scraping with the site default. Aborting the whole
-        // run because the user skipped a question was the previous behaviour
-        // and read as "scrapmf did nothing".
-        return None;
+    // Index 0 is the site default; the rest are the ranked profiles.
+    let entries: Vec<(String, Vec<String>)> = opts
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            let details = if i == 0 {
+                vec!["keep whatever sites/*.toml configures".to_string()]
+            } else {
+                Vec::new()
+            };
+            (label.clone(), details)
+        })
+        .collect();
+    let index = match crate::cli::interactive::menu::pick_single_back(title, entries) {
+        Step::Value(i) => i,
+        step => return step.map(|_| CookiePick::skipped()),
     };
-    if choice == DEFAULT_COOKIE_CHOICE {
-        return None;
-    }
-    let index = opts.iter().position(|o| *o == choice)?;
-    ranked
-        .get(index - 1)
-        .map(|(_, name)| name)
-        .and_then(|name| cookies::profile_path(name))
-        .filter(|p| p.exists())
+    // Index 0 is the site default, which is an explicit answer, not a skip.
+    let file = if index == 0 {
+        None
+    } else {
+        ranked
+            .get(index - 1)
+            .map(|(_, name)| name)
+            .and_then(|name| cookies::profile_path(name))
+            .filter(|p| p.exists())
+    };
+    Step::Value(CookiePick { file, asked: true })
 }
 
 /// Label for the "keep whatever the site config says" option.
@@ -131,11 +187,16 @@ fn site_has_cookies(name: &str, sites: &[String]) -> bool {
 /// The previous version applied one override to every job in the batch, so in
 /// a mixed run a TikTok profile was handed to the Instagram job too — the
 /// exact kind of cross-session contamination this feature must never cause.
-fn apply_cookie_file_to_site(
-    jobs: &mut [(ScrapeRequest, String, String, String)],
-    file: &std::path::Path,
-    sites: &[String],
-) {
+/// Distinct site keys carried by these jobs, sorted. Used to offer only the
+/// cookie profiles that can actually authenticate the batch.
+fn distinct_sites(jobs: &[ScrapeJob]) -> Vec<String> {
+    let mut v: Vec<String> = jobs.iter().map(|(_, site, ..)| site.clone()).collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+fn apply_cookie_file_to_site(jobs: &mut [ScrapeJob], file: &std::path::Path, sites: &[String]) {
     for (req, site, ..) in jobs.iter_mut() {
         if sites.iter().any(|s| s == site) {
             req.cookies_file = Some(file.to_path_buf());
@@ -144,39 +205,61 @@ fn apply_cookie_file_to_site(
     }
 }
 
-pub(super) fn preview_and_execute(
-    requests: Vec<(ScrapeRequest, String, String, String)>,
-    cfg: &config::Config,
-) {
+/// Run a batch inside the dashboard after the pre-flight preview.
+///
+/// Returns `Step::Back` when the user pressed Esc on the preview so the
+/// caller can re-ask the question before it — the preview is the last
+/// question of a flow, and backing out of it used to abandon the whole run.
+pub(super) fn preview_and_execute(requests: Vec<ScrapeJob>, cfg: &config::Config) -> Step<()> {
     if requests.is_empty() {
         println!("ℹ No content selected");
-        return;
+        return Step::Value(());
     }
-    println!("✔ Ready — {} job(s):", requests.len());
+    // The summary and the decision share one box, so the confirmation looks
+    // like the rest of the app instead of dropping out of it. Without a TTY the
+    // plain lines are kept, which is what scripts and CI rely on.
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let mut summary: Vec<String> = vec![format!("✔ Ready — {} job(s):", requests.len())];
     for (i, (req, site, username, kinds_desc)) in requests.iter().enumerate() {
         let out = req
             .output
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| cfg.general.output_dir.display().to_string());
-        println!(
-            "  {}. {}:{} → {kinds_desc} → {}",
-            i + 1,
-            site,
-            username,
-            out
-        );
+        summary.push(format!("  {}. {site}:{username} → {kinds_desc}", i + 1));
+        summary.push(format!("     → {out}"));
         // Surface the session each job will actually use, so a wrong cookie
         // profile is visible here rather than discovered after the download.
-        println!("      session: {}", describe_cookie_source(req));
+        summary.push(format!("     session: {}", describe_cookie_source(req)));
     }
-    let proceed = Confirm::new("Proceed?")
-        .with_render_config(super::theme::render_config())
-        .with_default(false)
-        .prompt();
-    if !proceed.unwrap_or(false) {
+
+    let proceed = if tty {
+        // Enter is the fast path: the expected action is to continue.
+        match crate::cli::interactive::menu::confirm_box(
+            "Download content",
+            "Proceed?",
+            &summary,
+            true,
+            false,
+        ) {
+            Step::Value(v) => v,
+            // Esc steps back to the question that built this batch. Nothing
+            // has been queued yet, so returning here is safe.
+            step => return step.map(|_| ()),
+        }
+    } else {
+        for line in &summary {
+            println!("{line}");
+        }
+        Confirm::new("Proceed?")
+            .with_render_config(super::theme::render_config())
+            .with_default(false)
+            .prompt()
+            .unwrap_or(false)
+    };
+    if !proceed {
         println!("canceled");
-        return;
+        return Step::Value(());
     }
 
     // Pre-flight: verify provider binaries exist before opening the dashboard.
@@ -216,12 +299,11 @@ pub(super) fn preview_and_execute(
             for m in &missing {
                 crate::output::print_error(m);
             }
-            return;
+            return Step::Value(());
         }
     }
 
     let total = requests.len();
-    let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
 
     // TTY: batch runs inside the ratatui dashboard (alternate screen).
     if tty {
@@ -363,7 +445,7 @@ pub(super) fn preview_and_execute(
                 }
             }
         }
-        return;
+        return Step::Value(());
     }
 
     // Non-TTY (CI/pipes): raw inherited output as before
@@ -385,6 +467,7 @@ pub(super) fn preview_and_execute(
             crate::application::media_scan::maybe_scan(&dir);
         }
     }
+    Step::Value(())
 }
 
 /// Format per-job outcome summary lines (shared TTY/non-TTY).
@@ -630,28 +713,79 @@ pub(super) fn auto_match_site_key(
 /// (profile page statusCode 10222), but their direct /video/<id> story
 /// links extract perfectly — so pasting links is the reliable route.
 pub(super) fn prompt_scrape_direct_urls() {
-    let Some(raw) = crate::cli::interactive::menu::input_text(
-        "Download content ─ URL(s)",
-        "Paste URL(s) — separate with spaces or commas:",
-        "https://www.tiktok.com/@user/video/123 https://www.instagram.com/reel/xyz/",
-        "each URL is matched against your sites/*.toml patterns",
-    ) else {
-        println!("canceled");
-        return;
-    };
+    // Re-ask with the previous text pre-filled: one bad URL in a batch should
+    // mean fixing that one, not starting over.
+    let mut previous = String::new();
+    'urls: loop {
+        let (urls, _errors) = loop {
+            let raw = match crate::cli::interactive::menu::input_text_back(
+                "Download content ─ URL(s)",
+                "Paste URL(s) — separate with spaces or commas:",
+                "https://www.tiktok.com/@user/video/123 https://www.instagram.com/reel/xyz/",
+                "each URL is matched against your sites/*.toml patterns",
+                &previous,
+            ) {
+                Step::Value(v) => v,
+                // First question of this flow: Esc leaves.
+                Step::Back | Step::Cancel => {
+                    println!("canceled");
+                    return;
+                }
+            };
+            let (urls, errors) = parse_pasted_urls(&raw);
+            for e in &errors {
+                println!("⚠ skipped invalid URL — {e}");
+            }
+            // Keep the text even on success: coming back from the cookie question
+            // or the preview re-fills the box instead of losing the batch.
+            previous = raw;
+            if urls.is_empty() {
+                println!("ℹ No valid URLs — Esc to cancel");
+                continue;
+            }
+            break (urls, errors);
+        };
 
-    let (urls, errors) = parse_pasted_urls(&raw);
-    for e in &errors {
-        println!("⚠ skipped invalid URL — {e}");
-    }
-    if urls.is_empty() {
-        println!("ℹ No valid URLs");
-        return;
-    }
+        let cfg = config::load().unwrap_or_default();
 
-    let cfg = config::load().unwrap_or_default();
+        loop {
+            // Rebuilt every pass: `preview_and_execute` consumes the batch, so a
+            // new cookie choice has to start from the URLs again.
+            let mut jobs = direct_url_jobs(&urls, &cfg);
+
+            // Per-run cookie override (named profile instead of site defaults).
+            // The sites are derived from the resolved jobs, not guessed, so the
+            // profile filter actually has domains to work with.
+            let job_sites = distinct_sites(&jobs);
+            let pick = match prompt_cookie_override(&job_sites) {
+                Step::Value(p) => p,
+                // Esc on cookies returns to the URL box, still holding the text.
+                Step::Back => continue 'urls,
+                Step::Cancel => return,
+            };
+            if let Some(ref file) = pick.file {
+                apply_cookie_file_to_site(&mut jobs, file, &job_sites);
+            }
+
+            match preview_and_execute(jobs, &cfg) {
+                Step::Value(()) | Step::Cancel => return,
+                Step::Back => {
+                    // Go back to the cookie question only if it was actually
+                    // shown. Without stored profiles it never was, so aiming
+                    // at it here would land on this same preview forever.
+                    if !pick.asked {
+                        continue 'urls;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One job per pasted URL, auto-matched against sites/*.toml.
+fn direct_url_jobs(urls: &[String], cfg: &config::Config) -> Vec<ScrapeJob> {
     let mut jobs = Vec::new();
-    for url in &urls {
+    for url in urls {
         let label = url
             .trim_end_matches('/')
             .rsplit('/')
@@ -662,7 +796,7 @@ pub(super) fn prompt_scrape_direct_urls() {
         // Auto-match site config by pattern; URLs from unconfigured sites
         // still scrape with general defaults (gallery-dl supports hundreds
         // of extractors natively — inherits the old "(no site)" behavior).
-        if let Some((site_key, site)) = auto_match_site_key(&cfg, url) {
+        if let Some((site_key, site)) = auto_match_site_key(cfg, url) {
             let output = Some(match &site.output_dir {
                 Some(o) => crate::config::expand_output_dir(o),
                 None => crate::config::expand_output_dir(&cfg.general.output_dir),
@@ -718,26 +852,7 @@ pub(super) fn prompt_scrape_direct_urls() {
             ));
         }
     }
-
-    // Per-run cookie override (named profile instead of site defaults).
-    // The sites are derived from the resolved jobs, not guessed, so the
-    // profile filter actually has domains to work with.
-    let job_sites: Vec<String> = {
-        let mut v: Vec<String> = jobs.iter().map(|(_, site, ..)| site.clone()).collect();
-        v.sort();
-        v.dedup();
-        v
-    };
-    let cookie_override = if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-        prompt_cookie_override(&job_sites)
-    } else {
-        None
-    };
-    if let Some(ref file) = cookie_override {
-        apply_cookie_file_to_site(&mut jobs, file, &job_sites);
-    }
-
-    preview_and_execute(jobs, &cfg);
+    jobs
 }
 
 /// Stems of sites/*.toml files + registry entries, sorted. Registry is the
@@ -776,6 +891,40 @@ pub(super) fn site_options_with_fallbacks(fallbacks: &[&str]) -> Vec<String> {
     opts
 }
 
+/// Normalise what the user typed for a username: trim surrounding whitespace
+/// and nothing else.
+///
+/// A leading `@` is deliberately kept. It is stripped later, where the value is
+/// turned into a URL, and stripping it here made the text change under the user
+/// when a question was revisited — and reduced a lone `@` to an empty string,
+/// which the caller could not tell apart from no answer at all.
+pub(crate) fn username_prompt_value(raw: &str) -> String {
+    raw.trim().to_string()
+}
+
+/// Ask for the account to scrape. Returns `None` when the user steps back, in
+/// which case the caller shows the previous question again; `initial` carries
+/// whatever was typed before so only the wrong part has to be corrected.
+fn username_prompt(site: &str, initial: &str) -> Option<String> {
+    let prompt = if site == "facebook" {
+        "ID o URL del perfil (ej. 123..., https://www.facebook.com/profile.php?id=...):"
+    } else if site == "instagram" {
+        "Username or ID (without @):"
+    } else {
+        "Username (without @):"
+    };
+    match crate::cli::interactive::menu::input_text_back(
+        &format!("Download content ─ {site}"),
+        prompt,
+        "someuser",
+        "",
+        initial,
+    ) {
+        Step::Value(v) => Some(username_prompt_value(&v)),
+        Step::Back | Step::Cancel => None,
+    }
+}
+
 pub(super) fn prompt_quick_scrape() {
     let cfg = config::load().unwrap_or_default();
 
@@ -784,370 +933,443 @@ pub(super) fn prompt_quick_scrape() {
         site_options_with_fallbacks(&["instagram", "tiktok", "twitter", "vsco", "facebook"]);
 
     // Decorated Browser with fixed chrome `╭ SCRAPMF v1.7.0 ─ Download content ─╮`
-    let opts: Vec<(String, Vec<String>)> = site_opts
-        .iter()
-        .map(|k| {
-            let spec = crate::sites::registry::find_by_id(k);
-            let details = if let Some(s) = spec {
-                vec![
-                    format!("pattern: {}", s.patterns.join(", ")),
-                    format!("backend: {:?}", s.backend),
-                    format!("kinds: {}", s.content_kinds.join(", ")),
-                ]
-            } else {
-                vec!["custom site (sites/*.toml)".to_string()]
+    // Rebuilt whenever the flow returns to this question.
+    let site_opts_ui = |site_opts: &[String]| -> Vec<(String, Vec<String>)> {
+        site_opts
+            .iter()
+            .map(|k| {
+                let spec = crate::sites::registry::find_by_id(k);
+                let details = if let Some(s) = spec {
+                    vec![
+                        format!("pattern: {}", s.patterns.join(", ")),
+                        format!("backend: {:?}", s.backend),
+                        format!("kinds: {}", s.content_kinds.join(", ")),
+                    ]
+                } else {
+                    vec!["custom site (sites/*.toml)".to_string()]
+                };
+                (crate::cli::interactive::theme::brand_site_label(k), details)
+            })
+            .collect()
+    };
+
+    // site ⇄ username ⇄ content. Esc steps back one question instead of
+    // discarding the run, and the username is kept so a typo is corrected in
+    // place rather than retyped.
+    let mut username_answer = String::new();
+    // Labelled at both levels so Esc can walk back through the whole flow:
+    // preview → cookies → content → username → site.
+    'wizard: loop {
+        let site_name = loop {
+            // Rebuilt each time so a step back re-renders the full list.
+            let site_list = site_opts_ui(&site_opts);
+            let idx =
+                match crate::cli::interactive::menu::pick_single("Download content", site_list) {
+                    Step::Value(i) => i,
+                    // First question of the flow: Esc leaves.
+                    Step::Back | Step::Cancel => return,
+                };
+            let site = site_opts[idx].clone();
+            // Re-ask rather than treat a bare "@" as no answer: previously an
+            // input that normalised to empty looked like a step back, so the
+            // user was thrown out of the flow for a typo instead of fixing it.
+            let typed = loop {
+                match username_prompt(&site, &username_answer) {
+                    Some(t) if t.is_empty() => {
+                        println!("⚠ Enter a username");
+                        continue;
+                    }
+                    Some(t) => break t,
+                    None => break String::new(),
+                }
             };
-            (crate::cli::interactive::theme::brand_site_label(k), details)
-        })
-        .collect();
-    let Some(idx) = crate::cli::interactive::menu::pick_single("Download content", opts) else {
-        return;
-    };
-    let site_name = site_opts[idx].clone();
-    let prompt_text = if site_name == "facebook" {
-        "ID o URL del perfil (ej. 123..., https://www.facebook.com/profile.php?id=...):"
-    } else if site_name == "instagram" {
-        "Username or ID (without @):"
-    } else {
-        "Username (without @):"
-    };
-    let raw_input = match crate::cli::interactive::menu::input_text(
-        &format!("Download content ─ {site_name}"),
-        prompt_text,
-        "someuser",
-        "",
-    )
-    .map(|s| s.trim().to_string())
-    .filter(|s| !s.is_empty())
-    {
-        Some(s) => s,
-        None => return,
-    };
-    // Facebook: accept ID or full profile URL (profile.php?id=, people/Name/ID, fb.com, etc.)
-    // Instagram: accept ID (7-19 digits) as before. Both resolve ID → username.
-    let (raw_is_id, raw_id, display_for_menu) = if site_name == "instagram"
-        && crate::application::instagram_resolver::is_id_like(&raw_input)
-    {
-        let id = crate::application::instagram_resolver::normalize_id(&raw_input);
-        (true, id.clone(), id)
-    } else if site_name == "facebook" {
-        if let Some(extracted) =
-            crate::application::facebook_resolver::extract_identifier(&raw_input)
-        {
-            let is_id = crate::application::facebook_resolver::is_id_like(&extracted);
-            if is_id {
-                let nid = crate::application::facebook_resolver::normalize_id(&extracted);
-                (true, nid.clone(), nid)
+            if typed.is_empty() {
+                // Esc at the username returns to the site list.
+                continue;
+            }
+            username_answer = typed;
+            break site;
+        };
+
+        let raw_input = username_answer.clone();
+        // Labelled so Esc on the cookie question re-asks this content list.
+        'kinds: loop {
+            let kinds = match prompt_content_kinds(
+                &site_name,
+                &super::theme::brand_account_label(&format!("{site_name}:{raw_input}")),
+            ) {
+                Step::Value(k) if k.is_empty() => {
+                    println!("ℹ No content selected");
+                    return;
+                }
+                Step::Value(k) => k,
+                // Esc at content returns to the username, keeping its text.
+                Step::Back => {
+                    match username_prompt(&site_name, &username_answer) {
+                        Some(typed) => username_answer = typed,
+                        // Esc again steps back to the site list, which is what
+                        // the outer label is for.
+                        None => continue 'wizard,
+                    }
+                    // The username changed, so the content list is asked again.
+                    continue 'kinds;
+                }
+                Step::Cancel => return,
+            };
+            // Facebook: accept ID or full profile URL (profile.php?id=, people/Name/ID, fb.com, etc.)
+            // Instagram: accept ID (7-19 digits) as before. Both resolve ID → username.
+            let (raw_is_id, raw_id, display_for_menu) = if site_name == "instagram"
+                && crate::application::instagram_resolver::is_id_like(&raw_input)
+            {
+                let id = crate::application::instagram_resolver::normalize_id(&raw_input);
+                (true, id.clone(), id)
+            } else if site_name == "facebook" {
+                if let Some(extracted) =
+                    crate::application::facebook_resolver::extract_identifier(&raw_input)
+                {
+                    let is_id = crate::application::facebook_resolver::is_id_like(&extracted);
+                    if is_id {
+                        let nid = crate::application::facebook_resolver::normalize_id(&extracted);
+                        (true, nid.clone(), nid)
+                    } else {
+                        (false, String::new(), extracted)
+                    }
+                } else {
+                    (
+                        false,
+                        String::new(),
+                        raw_input.trim().trim_start_matches('@').to_string(),
+                    )
+                }
             } else {
-                (false, String::new(), extracted)
-            }
-        } else {
-            (
-                false,
-                String::new(),
-                raw_input.trim().trim_start_matches('@').to_string(),
-            )
-        }
-    } else {
-        (
-            false,
-            String::new(),
-            raw_input.trim().trim_start_matches('@').to_string(),
-        )
-    };
-    // Keep original ID for facebook URL building (pages use profile.php?id=ID, not sanitized title)
-    let facebook_id_for_url: Option<String> = if site_name == "facebook" && raw_is_id {
-        Some(raw_id.clone())
-    } else {
-        None
-    };
+                (
+                    false,
+                    String::new(),
+                    raw_input.trim().trim_start_matches('@').to_string(),
+                )
+            };
+            // Keep original ID for facebook URL building (pages use profile.php?id=ID, not sanitized title)
+            let facebook_id_for_url: Option<String> = if site_name == "facebook" && raw_is_id {
+                Some(raw_id.clone())
+            } else {
+                None
+            };
 
-    // Content menu — same cycle as username (choose content before cookies/resolve)
-    let kinds = prompt_content_kinds(
-        &site_name,
-        &super::theme::brand_account_label(&format!("{site_name}:{display_for_menu}")),
-    );
-    if kinds.is_empty() {
-        println!("ℹ No content selected");
-        return;
-    }
+            // Content menu — same cycle as username (choose content before cookies/resolve)
 
-    // Site config (raw, not yet baked with username)
-    let site_cfg = cfg.sites.get(site_name.as_str()).cloned();
-    let extractor_options_raw = site_cfg
-        .as_ref()
-        .map(|s| s.extractor.clone())
-        .unwrap_or_default();
-    let directory_template_raw = site_cfg.as_ref().and_then(|s| s.directory_template.clone());
-    let cookies_from_browser_cfg = site_cfg
-        .as_ref()
-        .and_then(|s| s.cookies_from_browser.clone());
-    let cookies_file_cfg = site_cfg.as_ref().and_then(|s| s.cookies.clone());
-    let rate_limit = site_cfg.as_ref().and_then(|s| s.rate_limit.clone());
-    let archive = site_cfg.as_ref().and_then(|s| s.archive.clone());
-    let extra_args = site_cfg
-        .as_ref()
-        .map(|s| s.extra_args.clone())
-        .unwrap_or_default();
-    let filename_template = site_cfg.as_ref().and_then(|s| s.filename_template.clone());
+            // Site config (raw, not yet baked with username)
+            let site_cfg = cfg.sites.get(site_name.as_str()).cloned();
+            let extractor_options_raw = site_cfg
+                .as_ref()
+                .map(|s| s.extractor.clone())
+                .unwrap_or_default();
+            let directory_template_raw =
+                site_cfg.as_ref().and_then(|s| s.directory_template.clone());
+            let cookies_from_browser_cfg = site_cfg
+                .as_ref()
+                .and_then(|s| s.cookies_from_browser.clone());
+            let cookies_file_cfg = site_cfg.as_ref().and_then(|s| s.cookies.clone());
+            let rate_limit = site_cfg.as_ref().and_then(|s| s.rate_limit.clone());
+            let archive = site_cfg.as_ref().and_then(|s| s.archive.clone());
+            let extra_args = site_cfg
+                .as_ref()
+                .map(|s| s.extra_args.clone())
+                .unwrap_or_default();
+            let filename_template = site_cfg.as_ref().and_then(|s| s.filename_template.clone());
 
-    // Per-run cookie override comes BEFORE ID resolution so resolver uses
-    // the same session that will be used for downloading (same cycle as username).
-    let cookie_override = if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-        prompt_cookie_override(std::slice::from_ref(&site_name))
-    } else {
-        None
-    };
-    // Ensure terminal line is clean after Select (inquire leaves raw escape on some terms)
-    println!();
-    let (cookies_file_for_resolve, cookies_browser_for_resolve) =
-        if let Some(ref ov) = cookie_override {
-            (Some(ov.as_path()), None)
-        } else {
-            (
-                cookies_file_cfg.as_deref(),
-                cookies_from_browser_cfg.as_deref(),
-            )
-        };
+            // Everything from here to the preview is re-runnable, because Esc on the
+            // preview comes back to the cookie question and the batch is rebuilt from
+            // the URLs with the new session.
+            loop {
+                // Per-run cookie override comes BEFORE ID resolution so resolver uses
+                // the same session that will be used for downloading (same cycle as username).
+                let pick = match prompt_cookie_override(std::slice::from_ref(&site_name)) {
+                    Step::Value(p) => p,
+                    // Esc on cookies goes back to the content list; the site and the
+                    // username typed so far are kept.
+                    Step::Back => continue 'kinds,
+                    Step::Cancel => return,
+                };
+                let cookie_override = pick.file.clone();
+                let (cookies_file_for_resolve, cookies_browser_for_resolve) =
+                    if let Some(ref ov) = cookie_override {
+                        (Some(ov.as_path()), None)
+                    } else {
+                        (
+                            cookies_file_cfg.as_deref(),
+                            cookies_from_browser_cfg.as_deref(),
+                        )
+                    };
 
-    // Now resolve ID → username if needed, using the final cookies
-    let username = if raw_is_id {
-        let res = if site_name == "instagram" {
-            crate::application::instagram_resolver::resolve_instagram_username(
-                &raw_id,
-                cookies_file_for_resolve,
-                cookies_browser_for_resolve,
-            )
-        } else if site_name == "facebook" {
-            crate::application::facebook_resolver::resolve_facebook_id_to_username(
-                &raw_id,
-                cookies_file_for_resolve,
-                cookies_browser_for_resolve,
-            )
-        } else {
-            Err(anyhow::anyhow!("unsupported site for ID"))
-        };
-        match res {
-            Ok(u) => {
-                println!("→ {} → @{} (resuelto)", raw_id, u);
-                u
-            }
-            Err(e) => {
-                let site_label = if site_name == "facebook" { "FB" } else { "IG" };
-                crate::output::print_error(&format!(
-                    "no se pudo resolver ID a username: {e} — verifica el ID y que la sesión de {site_label} esté vigente"
-                ));
-                crate::output::print_help("nota: el error queda visible hasta que presiones Enter");
-                let _ = Text::new("Presiona Enter para volver")
-                    .with_render_config(super::theme::render_config())
-                    .prompt();
-                return;
-            }
-        }
-    } else {
-        display_for_menu.clone()
-    };
+                // Now resolve ID → username if needed, using the final cookies
+                let username = if raw_is_id {
+                    let res = if site_name == "instagram" {
+                        crate::application::instagram_resolver::resolve_instagram_username(
+                            &raw_id,
+                            cookies_file_for_resolve,
+                            cookies_browser_for_resolve,
+                        )
+                    } else if site_name == "facebook" {
+                        crate::application::facebook_resolver::resolve_facebook_id_to_username(
+                            &raw_id,
+                            cookies_file_for_resolve,
+                            cookies_browser_for_resolve,
+                        )
+                    } else {
+                        Err(anyhow::anyhow!("unsupported site for ID"))
+                    };
+                    match res {
+                        Ok(u) => {
+                            println!("→ {} → @{} (resuelto)", raw_id, u);
+                            u
+                        }
+                        Err(e) => {
+                            let site_label = if site_name == "facebook" { "FB" } else { "IG" };
+                            crate::output::print_error(&format!(
+                                "no se pudo resolver ID a username: {e} — verifica el ID y que la sesión de {site_label} esté vigente"
+                            ));
+                            crate::output::print_help(
+                                "nota: el error queda visible hasta que presiones Enter",
+                            );
+                            let _ = Text::new("Presiona Enter para volver")
+                                .with_render_config(super::theme::render_config())
+                                .prompt();
+                            return;
+                        }
+                    }
+                } else {
+                    display_for_menu.clone()
+                };
 
-    let tagged = if site_name == "facebook"
-        && let Some(id) = &facebook_id_for_url
-    {
-        vec![
-            (
-                ContentKind::Posts,
-                format!("https://www.facebook.com/profile.php?id={id}/photos"),
-            ),
-            (
-                ContentKind::Albums,
-                format!("https://www.facebook.com/profile.php?id={id}/photos_albums"),
-            ),
-            (
-                ContentKind::Videos,
-                format!("https://www.facebook.com/profile.php?id={id}/videos/"),
-            ),
-        ]
-    } else {
-        build_tagged_urls(&site_name, &username)
-    };
-    let Some((url, extra_urls)) = select_urls(&tagged, &kinds) else {
-        println!("ℹ No content selected");
-        return;
-    };
-    if validate_url(&url).is_err() {
-        eprintln!("warn: skipping invalid url {url}");
-        return;
-    }
-
-    let kinds_desc = super::content::kinds_description(&site_name, &kinds);
-
-    // QUICK MODE — bake the resolved username into directory templates
-    let directory_template = directory_template_raw
-        .clone()
-        .map(|dirs| flatten_quick_dirs(dirs, &username));
-    let mut extractor_options = extractor_options_raw.clone();
-    for v in extractor_options.values_mut() {
-        if let toml::Value::Table(map) = v
-            && let Some(dir) = map.get_mut("directory")
-        {
-            flatten_for_quick(dir, &username);
-        }
-    }
-    // Final cookies for the jobs: override wins over site config
-    let (cookies_file, cookies_from_browser) = if let Some(ref ov) = cookie_override {
-        (Some(ov.clone()), None)
-    } else {
-        (cookies_file_cfg.clone(), cookies_from_browser_cfg.clone())
-    };
-
-    let base_req = |directory_override: Option<Vec<String>>,
-                    extra_opts: Vec<(String, String)>,
-                    extra_urls: Vec<String>,
-                    profile_name: String| {
-        let mut directory_template_field = None;
-        let mut opts = extractor_options.clone();
-        apply_quick_override(
-            &mut opts,
-            &mut directory_template_field,
-            &site_name,
-            directory_override,
-            extra_opts,
-        );
-        ScrapeRequest {
-            url: url.clone(),
-            output: Some(crate::config::expand_output_dir(&cfg.general.output_dir)),
-            preset: Some(site_name.clone()),
-            extra_args: extra_args.clone(),
-            cookies_from_browser: cookies_from_browser.clone(),
-            cookies_file: cookies_file.clone(),
-            archive: archive.clone(),
-            rate_limit: rate_limit.clone(),
-            extractor_options: opts,
-            filename_template: filename_template.clone(),
-            directory_template: directory_template_field,
-            extra_urls,
-            profile_name: Some(profile_name),
-            extra_extractor_opts: Vec::new(),
-
-            ..Default::default()
-        }
-    };
-
-    // Twitter Media needs TWO passes (see prompt_scrape_as_profile note):
-    // per-FILE conditional directories don't work on twitter.
-    if site_name == "twitter" {
-        let root = username.clone();
-        let mut jobs = Vec::new();
-        for (pass, dir_name, filter) in [
-            ("photos", "photos", "type == 'photo'"),
-            ("videos", "videos", "type != 'photo'"),
-        ] {
-            let dirs = vec![
-                username.clone(),
-                "twitter".to_string(),
-                "{user[name]}".to_string(),
-                dir_name.to_string(),
-            ];
-            let req = base_req(
-                Some(dirs),
-                vec![("file-filter".to_string(), filter.to_string())],
-                Vec::new(),
-                root.clone(),
-            );
-            jobs.push((
-                req,
-                site_name.clone(),
-                format!("{username} ({pass})"),
-                pass.to_string(),
-            ));
-        }
-        preview_and_execute(jobs, &cfg);
-        return;
-    }
-
-    // Threads: fotos/videos (posts) and profile pic are separate — profile needs --profile-pic-only
-    // Always 3 separate jobs so the dashboard shows progress 1-by-1, even for All.
-    if site_name == "threads" {
-        use crate::cli::interactive::content::ContentKind;
-        let has_photos = kinds.contains(&ContentKind::Photos);
-        let has_videos = kinds.contains(&ContentKind::Videos);
-        let has_profile = kinds.contains(&ContentKind::Profile);
-        if has_photos || has_videos || has_profile {
-            let mut jobs = Vec::new();
-            if has_photos {
-                let photos_dirs = flatten_quick_dirs(
+                let tagged = if site_name == "facebook"
+                    && let Some(id) = &facebook_id_for_url
+                {
                     vec![
-                        "{scrapmf_root}".to_string(),
-                        "{category}".to_string(),
-                        "{username}".to_string(),
-                        "photos".to_string(),
-                    ],
-                    &username,
-                );
-                let mut req_photos = base_req(
-                    Some(photos_dirs),
-                    Vec::new(),
-                    extra_urls.clone(),
-                    username.clone(),
-                );
-                req_photos.extra_args.push("--photos-only".to_string());
-                jobs.push((
-                    req_photos,
-                    site_name.clone(),
-                    format!("{username} (photos)"),
-                    "photos".to_string(),
-                ));
+                        (
+                            ContentKind::Posts,
+                            format!("https://www.facebook.com/profile.php?id={id}/photos"),
+                        ),
+                        (
+                            ContentKind::Albums,
+                            format!("https://www.facebook.com/profile.php?id={id}/photos_albums"),
+                        ),
+                        (
+                            ContentKind::Videos,
+                            format!("https://www.facebook.com/profile.php?id={id}/videos/"),
+                        ),
+                    ]
+                } else {
+                    build_tagged_urls(&site_name, &username)
+                };
+                let Some((url, extra_urls)) = select_urls(&tagged, &kinds) else {
+                    println!("ℹ No content selected");
+                    return;
+                };
+                if validate_url(&url).is_err() {
+                    eprintln!("warn: skipping invalid url {url}");
+                    return;
+                }
+
+                let kinds_desc = super::content::kinds_description(&site_name, &kinds);
+
+                // QUICK MODE — bake the resolved username into directory templates
+                let directory_template = directory_template_raw
+                    .clone()
+                    .map(|dirs| flatten_quick_dirs(dirs, &username));
+                let mut extractor_options = extractor_options_raw.clone();
+                for v in extractor_options.values_mut() {
+                    if let toml::Value::Table(map) = v
+                        && let Some(dir) = map.get_mut("directory")
+                    {
+                        flatten_for_quick(dir, &username);
+                    }
+                }
+                // Final cookies for the jobs: override wins over site config
+                let (cookies_file, cookies_from_browser) = if let Some(ref ov) = cookie_override {
+                    (Some(ov.clone()), None)
+                } else {
+                    (cookies_file_cfg.clone(), cookies_from_browser_cfg.clone())
+                };
+
+                let base_req = |directory_override: Option<Vec<String>>,
+                                extra_opts: Vec<(String, String)>,
+                                extra_urls: Vec<String>,
+                                profile_name: String| {
+                    let mut directory_template_field = None;
+                    let mut opts = extractor_options.clone();
+                    apply_quick_override(
+                        &mut opts,
+                        &mut directory_template_field,
+                        &site_name,
+                        directory_override,
+                        extra_opts,
+                    );
+                    ScrapeRequest {
+                        url: url.clone(),
+                        output: Some(crate::config::expand_output_dir(&cfg.general.output_dir)),
+                        preset: Some(site_name.clone()),
+                        extra_args: extra_args.clone(),
+                        cookies_from_browser: cookies_from_browser.clone(),
+                        cookies_file: cookies_file.clone(),
+                        archive: archive.clone(),
+                        rate_limit: rate_limit.clone(),
+                        extractor_options: opts,
+                        filename_template: filename_template.clone(),
+                        directory_template: directory_template_field,
+                        extra_urls,
+                        profile_name: Some(profile_name),
+                        extra_extractor_opts: Vec::new(),
+
+                        ..Default::default()
+                    }
+                };
+
+                // Twitter Media needs TWO passes (see prompt_scrape_as_profile note):
+                // per-FILE conditional directories don't work on twitter.
+                if site_name == "twitter" {
+                    let root = username.clone();
+                    let mut jobs = Vec::new();
+                    for (pass, dir_name, filter) in [
+                        ("photos", "photos", "type == 'photo'"),
+                        ("videos", "videos", "type != 'photo'"),
+                    ] {
+                        let dirs = vec![
+                            username.clone(),
+                            "twitter".to_string(),
+                            "{user[name]}".to_string(),
+                            dir_name.to_string(),
+                        ];
+                        let req = base_req(
+                            Some(dirs),
+                            vec![("file-filter".to_string(), filter.to_string())],
+                            Vec::new(),
+                            root.clone(),
+                        );
+                        jobs.push((
+                            req,
+                            site_name.clone(),
+                            format!("{username} ({pass})"),
+                            pass.to_string(),
+                        ));
+                    }
+                    match preview_and_execute(jobs, &cfg) {
+                        Step::Value(()) | Step::Cancel => return,
+                        // Esc on the preview goes back to the cookie question
+                        // when there was one to go back to, and to the content
+                        // list when there was not.
+                        Step::Back => {
+                            if !pick.asked {
+                                continue 'kinds;
+                            }
+                        }
+                    }
+                }
+
+                // Threads: fotos/videos (posts) and profile pic are separate — profile needs --profile-pic-only
+                // Always 3 separate jobs so the dashboard shows progress 1-by-1, even for All.
+                if site_name == "threads" {
+                    use crate::cli::interactive::content::ContentKind;
+                    let has_photos = kinds.contains(&ContentKind::Photos);
+                    let has_videos = kinds.contains(&ContentKind::Videos);
+                    let has_profile = kinds.contains(&ContentKind::Profile);
+                    if has_photos || has_videos || has_profile {
+                        let mut jobs = Vec::new();
+                        if has_photos {
+                            let photos_dirs = flatten_quick_dirs(
+                                vec![
+                                    "{scrapmf_root}".to_string(),
+                                    "{category}".to_string(),
+                                    "{username}".to_string(),
+                                    "photos".to_string(),
+                                ],
+                                &username,
+                            );
+                            let mut req_photos = base_req(
+                                Some(photos_dirs),
+                                Vec::new(),
+                                extra_urls.clone(),
+                                username.clone(),
+                            );
+                            req_photos.extra_args.push("--photos-only".to_string());
+                            jobs.push((
+                                req_photos,
+                                site_name.clone(),
+                                format!("{username} (photos)"),
+                                "photos".to_string(),
+                            ));
+                        }
+                        if has_videos {
+                            let videos_dirs = flatten_quick_dirs(
+                                vec![
+                                    "{scrapmf_root}".to_string(),
+                                    "{category}".to_string(),
+                                    "{username}".to_string(),
+                                    "videos".to_string(),
+                                ],
+                                &username,
+                            );
+                            let mut req_videos = base_req(
+                                Some(videos_dirs),
+                                Vec::new(),
+                                extra_urls.clone(),
+                                username.clone(),
+                            );
+                            req_videos.extra_args.push("--videos-only".to_string());
+                            jobs.push((
+                                req_videos,
+                                site_name.clone(),
+                                format!("{username} (videos)"),
+                                "videos".to_string(),
+                            ));
+                        }
+                        if has_profile {
+                            let profile_dirs = flatten_quick_dirs(
+                                vec![
+                                    "{scrapmf_root}".to_string(),
+                                    "{category}".to_string(),
+                                    "{username}".to_string(),
+                                    "profile".to_string(),
+                                ],
+                                &username,
+                            );
+                            let mut req_profile = base_req(
+                                Some(profile_dirs),
+                                Vec::new(),
+                                Vec::new(),
+                                username.clone(),
+                            );
+                            req_profile.profile_pic_only = true;
+                            jobs.push((
+                                req_profile,
+                                site_name.clone(),
+                                format!("{username} (profile)"),
+                                "profile".to_string(),
+                            ));
+                        }
+                        match preview_and_execute(jobs, &cfg) {
+                            Step::Value(()) | Step::Cancel => return,
+                            Step::Back => {
+                                if !pick.asked {
+                                    continue 'kinds;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let req = base_req(directory_template, Vec::new(), extra_urls, username.clone());
+                let jobs = vec![(req, site_name.clone(), username.clone(), kinds_desc)];
+                match preview_and_execute(jobs, &cfg) {
+                    Step::Value(()) | Step::Cancel => return,
+                    Step::Back => {
+                        if !pick.asked {
+                            continue 'kinds;
+                        }
+                    }
+                }
             }
-            if has_videos {
-                let videos_dirs = flatten_quick_dirs(
-                    vec![
-                        "{scrapmf_root}".to_string(),
-                        "{category}".to_string(),
-                        "{username}".to_string(),
-                        "videos".to_string(),
-                    ],
-                    &username,
-                );
-                let mut req_videos = base_req(
-                    Some(videos_dirs),
-                    Vec::new(),
-                    extra_urls.clone(),
-                    username.clone(),
-                );
-                req_videos.extra_args.push("--videos-only".to_string());
-                jobs.push((
-                    req_videos,
-                    site_name.clone(),
-                    format!("{username} (videos)"),
-                    "videos".to_string(),
-                ));
-            }
-            if has_profile {
-                let profile_dirs = flatten_quick_dirs(
-                    vec![
-                        "{scrapmf_root}".to_string(),
-                        "{category}".to_string(),
-                        "{username}".to_string(),
-                        "profile".to_string(),
-                    ],
-                    &username,
-                );
-                let mut req_profile =
-                    base_req(Some(profile_dirs), Vec::new(), Vec::new(), username.clone());
-                req_profile.profile_pic_only = true;
-                jobs.push((
-                    req_profile,
-                    site_name.clone(),
-                    format!("{username} (profile)"),
-                    "profile".to_string(),
-                ));
-            }
-            preview_and_execute(jobs, &cfg);
-            return;
         }
     }
-
-    let req = base_req(directory_template, Vec::new(), extra_urls, username.clone());
-    let jobs = vec![(req, site_name.clone(), username.clone(), kinds_desc)];
-    preview_and_execute(jobs, &cfg);
 }
 
 #[cfg(test)]
@@ -1469,6 +1691,91 @@ mod quick_flatten_tests {
         assert!(
             unknown_domains.is_empty(),
             "an empty site key must resolve to no domains, not all domains"
+        );
+    }
+
+    // ─── Username normalisation ─────────────────────────────────────────────
+
+    /// The typed value round-trips apart from surrounding whitespace. Keeping
+    /// the `@` matters: it is stripped where the URL is built, and stripping
+    /// it here changed the text under the user on a revisit.
+    #[test]
+    fn username_keeps_the_at_sign_the_user_typed() {
+        use super::username_prompt_value;
+        assert_eq!(username_prompt_value("@user"), "@user");
+        assert_eq!(username_prompt_value("  @user  "), "@user");
+        assert_eq!(username_prompt_value("user"), "user");
+    }
+
+    /// A lone `@` must not collapse to "no answer", or a single stray
+    /// character would eject the user from the flow.
+    #[test]
+    fn a_lone_at_sign_is_not_an_empty_answer() {
+        use super::username_prompt_value;
+        assert!(!username_prompt_value("@").is_empty());
+        assert!(!username_prompt_value("   @   ").is_empty());
+        assert!(username_prompt_value("   ").is_empty());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod back_chain_tests {
+    use super::{direct_url_jobs, distinct_sites};
+    use crate::application::scraper::ScrapeRequest;
+    use crate::config::Config;
+
+    fn job(site: &str) -> super::ScrapeJob {
+        (
+            ScrapeRequest::default(),
+            site.to_string(),
+            format!("{site}:someone"),
+            "posts".to_string(),
+        )
+    }
+
+    #[test]
+    fn distinct_sites_sorts_and_dedupes() {
+        // The cookie filter is only useful if a site appears once, otherwise
+        // the same profile is offered twice in the ranking.
+        let sites = distinct_sites(&[job("tiktok"), job("instagram"), job("tiktok")]);
+        assert_eq!(sites, vec!["instagram".to_string(), "tiktok".to_string()]);
+    }
+
+    #[test]
+    fn the_cookie_question_only_exists_when_it_was_shown() {
+        use super::should_ask_cookies;
+        // Without a TTY there is nobody to answer, and with no stored profile
+        // there is nothing to choose. A step back aimed at a question that was
+        // never shown lands on the same preview, which is the bug this guards.
+        assert!(!should_ask_cookies(false, 0), "no TTY, no profiles");
+        assert!(
+            !should_ask_cookies(true, 0),
+            "no profiles means nothing to ask about"
+        );
+        assert!(!should_ask_cookies(false, 3), "a pipe cannot answer");
+        assert!(should_ask_cookies(true, 1), "a TTY with a profile asks");
+    }
+
+    #[test]
+    fn direct_url_jobs_keeps_every_pasted_url() {
+        // The batch is rebuilt on every pass of the cookie/preview loop, so
+        // losing a URL here would silently drop downloads after a step back.
+        let cfg = Config::default();
+        let urls = vec![
+            "https://www.tiktok.com/@user/video/1".to_string(),
+            "https://www.instagram.com/reel/abc/".to_string(),
+        ];
+        let jobs = direct_url_jobs(&urls, &cfg);
+        assert_eq!(jobs.len(), 2);
+        let rebuilt = direct_url_jobs(&urls, &cfg);
+        assert_eq!(
+            rebuilt
+                .iter()
+                .map(|(_, s, ..)| s.clone())
+                .collect::<Vec<_>>(),
+            jobs.iter().map(|(_, s, ..)| s.clone()).collect::<Vec<_>>(),
+            "rebuilding after a step back must yield the same batch"
         );
     }
 }

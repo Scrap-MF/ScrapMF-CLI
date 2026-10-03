@@ -2,7 +2,7 @@ use super::profiles::{edit_profile_menu, prompt_new_profile_accounts};
 use super::{ask_nonempty, clear_screen, edit_with_editor, select_menu, theme::render_config};
 use std::path::Path;
 
-use inquire::{Confirm, Text};
+use inquire::Text;
 
 pub(super) fn configuration_submenu() {
     use crate::cli::interactive::browser::{Browser, Outcome};
@@ -135,10 +135,12 @@ fn general_settings_menu() {
                 (o.clone(), details)
             })
             .collect();
-        let Some(idx) =
-            crate::cli::interactive::menu::pick_single("Configuration ─ General settings", opts)
-        else {
-            return;
+        let idx = match crate::cli::interactive::menu::pick_single(
+            "Configuration ─ General settings",
+            opts,
+        ) {
+            crate::cli::interactive::menu::Step::Value(i) => i,
+            _ => return,
         };
         let choice = options[idx].clone();
         if choice.starts_with("Output directory:") {
@@ -181,11 +183,14 @@ fn general_settings_menu() {
             let new_val = !cfg.general.archive;
             let label = if new_val { "enabled" } else { "disabled" };
             let prompt = format!("Turn download archive {label}?");
-            let ok = Confirm::new(&prompt)
-                .with_default(true)
-                .with_render_config(super::theme::render_config())
-                .prompt()
-                .unwrap_or(false);
+            let ok = crate::cli::interactive::menu::confirm_back(
+                "Configuration ─ General settings",
+                &prompt,
+                true,
+                false,
+            )
+            .value()
+            .unwrap_or(false);
             if !ok {
                 continue;
             }
@@ -245,14 +250,15 @@ fn capture_browser_options() -> Vec<String> {
 fn create_profile_wizard() {
     use crate::config::cookies;
     let browsers = capture_browser_options();
-    let Some(b_idx) = crate::cli::interactive::menu::pick_single(
+    let b_idx = match crate::cli::interactive::menu::pick_single(
         "Configuration ─ Cookie capture ─ Browser",
         browsers
             .iter()
             .map(|b| (b.clone(), vec![format!("capture from {b}")]))
             .collect(),
-    ) else {
-        return;
+    ) {
+        crate::cli::interactive::menu::Step::Value(i) => i,
+        _ => return,
     };
     let browser = browsers[b_idx].clone();
 
@@ -280,12 +286,13 @@ fn create_profile_wizard() {
         }));
         v
     };
-    let Some(picked_idxs) = crate::cli::interactive::menu::pick_multi(
+    let picked_idxs = match crate::cli::interactive::menu::pick_multi(
         "Configuration ─ Cookie capture ─ Networks",
         net_opts.clone(),
         &[],
-    ) else {
-        return;
+    ) {
+        crate::cli::interactive::menu::Step::Value(v) => v,
+        _ => return,
     };
     let picked_raw: Vec<String> = picked_idxs
         .into_iter()
@@ -456,11 +463,14 @@ fn profile_detail_menu(name: &str) {
                             "  To refresh, re-export with 'Get cookies.txt LOCALLY' while logged in,"
                         );
                         println!("  then use Import profile → From file / Paste.");
-                        let go_import = Confirm::new("Open Import menu now?")
-                            .with_default(false)
-                            .with_render_config(super::theme::render_config())
-                            .prompt()
-                            .unwrap_or(false);
+                        let go_import = crate::cli::interactive::menu::confirm_back(
+                            "Cookie profiles",
+                            "Open Import menu now?",
+                            false,
+                            false,
+                        )
+                        .value()
+                        .unwrap_or(false);
                         if go_import {
                             import_profile_submenu_prefilled(name);
                         } else {
@@ -477,11 +487,15 @@ fn profile_detail_menu(name: &str) {
                 }
             }
             "Delete profile" => {
-                let ok = Confirm::new(&format!("Delete profile '{name}'?"))
-                    .with_default(false)
-                    .with_render_config(super::theme::render_config())
-                    .prompt()
-                    .unwrap_or(false);
+                // Destructive: Enter keeps the profile, `y` deletes it.
+                let ok = crate::cli::interactive::menu::confirm_back(
+                    "Cookie profiles",
+                    &format!("Delete profile '{name}'?"),
+                    false,
+                    true,
+                )
+                .value()
+                .unwrap_or(false);
                 if ok {
                     match cookies::delete_profile(name) {
                         Ok(true) => {
@@ -642,11 +656,15 @@ pub(super) fn site_submenu(name: &str, dir: &Path) {
                 return;
             }
         } else if choice == "Delete site" {
-            if Confirm::new(&format!("Delete {name}.toml?"))
-                .with_render_config(render_config())
-                .with_default(false)
-                .prompt()
-                .unwrap_or(false)
+            // Destructive: Enter keeps the file, `y` deletes it.
+            if crate::cli::interactive::menu::confirm_back(
+                "Manage Sites",
+                &format!("Delete {name}.toml?"),
+                false,
+                true,
+            )
+            .value()
+            .unwrap_or(false)
             {
                 let _ = std::fs::remove_file(&path);
                 println!("✔ Deleted {name}");

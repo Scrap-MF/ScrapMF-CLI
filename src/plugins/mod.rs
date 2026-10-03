@@ -8,7 +8,7 @@
 //! Layout under `$XDG_DATA_HOME/scrapmf/`:
 //! ```text
 //!   plugins/threads/venv/     dedicated virtualenv (python3 -m venv)
-//!   plugins/threads/version   installed pin, e.g. "v1.0.5"
+//!   plugins/threads/version   installed pin, e.g. "v1.2.0"
 //!   bin/threadstractormf      entry-point link to the venv binary
 //! ```
 //!
@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 /// Exact upstream release scrapmf installs. Bump manually per scrapmf
 /// release (same policy as `application::backend::GALLERY_DL_PIN`).
-pub const THREADSTRACTOR_PIN: &str = "v1.0.5";
+pub const THREADSTRACTOR_PIN: &str = "v1.2.0";
 
 // ─── Plugin registry ────────────────────────────────────────────────────────
 
@@ -67,7 +67,7 @@ pub const THREADSTRACTOR_REPO: &str = "https://github.com/ExtractorsMF/Threadstr
 
 const PKG_SPEC: &str = concat!(
     "threadstractormf[browser] @ git+",
-    "https://github.com/ExtractorsMF/ThreadstractorMF.git@v1.0.5"
+    "https://github.com/ExtractorsMF/ThreadstractorMF.git@v1.2.0"
 );
 
 /// Lifecycle state of the threads plugin.
@@ -394,15 +394,15 @@ mod tests {
             PluginState::NotInstalled
         );
         assert_eq!(
-            compute_state_with(false, true, "v1.0.5"),
+            compute_state_with(false, true, "v1.2.0"),
             PluginState::NotInstalled
         );
         assert_eq!(
-            compute_state_with(true, true, "v1.0.5"),
+            compute_state_with(true, true, "v1.2.0"),
             PluginState::Disabled
         );
-        match compute_state_with(true, false, "v1.0.5") {
-            PluginState::Enabled(v) => assert_eq!(v, "v1.0.5"),
+        match compute_state_with(true, false, "v1.2.0") {
+            PluginState::Enabled(v) => assert_eq!(v, "v1.2.0"),
             other => panic!("expected Enabled, got {other:?}"),
         }
         // empty/missing version file falls back to the pin marker
@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn pkg_spec_pins_version() {
-        assert!(PKG_SPEC.contains("@v1.0.5"));
+        assert!(PKG_SPEC.contains("@v1.2.0"));
         assert!(PKG_SPEC.starts_with("threadstractormf[browser] @ git+"));
     }
 

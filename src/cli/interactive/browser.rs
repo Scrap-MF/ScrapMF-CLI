@@ -47,7 +47,12 @@ pub enum Mode {
 pub enum Outcome {
     Picked(usize),
     Toggled(Vec<usize>),
+    /// The screen could not be used at all (no TTY, or too few entries).
     Quit,
+    /// Esc / q — go back to the previous question, keeping earlier answers.
+    Back,
+    /// Ctrl+C — abandon the whole flow.
+    Abandoned,
 }
 
 /// Fluent builder — see [`Browser::run`].
@@ -57,6 +62,7 @@ pub struct Browser {
     entries: Vec<Entry>,
     mode: Option<Mode>,
     checked: Vec<usize>,
+    hint: Option<String>,
 }
 
 impl Browser {
@@ -77,6 +83,13 @@ impl Browser {
         self
     }
 
+    /// Key hint rendered under the list, so a screen that steps back on Esc
+    /// says so instead of leaving the behaviour to be guessed.
+    pub fn hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
+
     /// Pre-checked indices (Multi only; ignored otherwise).
     // Used by the content-kinds / cookie-networks browsers (next phase).
     #[allow(dead_code)]
@@ -87,7 +100,13 @@ impl Browser {
 
     pub fn run(self) -> Outcome {
         let mode = self.mode.unwrap_or(Mode::Single);
-        run_browser(&self.title, &self.entries, mode, &self.checked)
+        run_browser(
+            &self.title,
+            &self.entries,
+            mode,
+            &self.checked,
+            self.hint.as_deref(),
+        )
     }
 }
 
@@ -124,7 +143,64 @@ fn row_prefix(mode: Mode, is_cursor: bool, is_checked: bool) -> String {
 
 // ─── TUI ────────────────────────────────────────────────────────────────────
 
-fn run_browser(title: &str, entries: &[Entry], mode: Mode, prechecked: &[usize]) -> Outcome {
+/// Decide what leaving the browser means, given how the loop ended.
+///
+/// Split out from the event loop so every combination is testable without a
+/// TTY. This logic is the difference between "my selection was accepted" and
+/// "the flow was abandoned", so it must not be reachable only by pressing real
+/// keys.
+fn outcome_for(
+    confirmed: bool,
+    went_back: bool,
+    abandoned: bool,
+    mode: Mode,
+    cursor: usize,
+    checked: &[bool],
+) -> Outcome {
+    if abandoned {
+        return Outcome::Abandoned;
+    }
+    if went_back {
+        return Outcome::Back;
+    }
+    if confirmed {
+        return match mode {
+            Mode::Single => Outcome::Picked(cursor),
+            Mode::Multi => {
+                let picked: Vec<usize> = checked
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, v)| v.then_some(i))
+                    .collect();
+                // Enter on the highlighted row means "just this one", the same
+                // as a single-select. An empty check list used to read as
+                // "chose none", which every caller treats as aborting the run,
+                // so Enter looked broken and Space was the only way in.
+                if picked.is_empty() {
+                    Outcome::Toggled(vec![cursor])
+                } else {
+                    Outcome::Toggled(picked)
+                }
+            }
+        };
+    }
+    // No key ever settled the loop (no TTY, empty list): nothing was chosen.
+    match mode {
+        Mode::Single => Outcome::Quit,
+        Mode::Multi => Outcome::Toggled(vec![]),
+    }
+}
+
+fn run_browser(
+    title: &str,
+    entries: &[Entry],
+    mode: Mode,
+    prechecked: &[usize],
+    hint: Option<&str>,
+) -> Outcome {
+    // A cancelled multi-select is an *empty* selection, not a quit: pressing
+    // Esc while picking kinds means "I chose none", which is a legitimate
+    // answer the caller must be able to distinguish from leaving the screen.
     let fallback = || match mode {
         Mode::Single => Outcome::Quit,
         Mode::Multi => Outcome::Toggled(vec![]),
@@ -150,7 +226,12 @@ fn run_browser(title: &str, entries: &[Entry], mode: Mode, prechecked: &[usize])
     }
     // Loop ends exactly once, via one of these:
     let mut confirmed = false;
-    let mut cancelled = false;
+    // Esc and Ctrl+C both leave the screen, but they mean different things to
+    // the caller: Esc steps back to the previous question, Ctrl+C abandons the
+    // whole flow. `Browser::run` therefore has to tell them apart, so the
+    // distinction is tracked separately instead of collapsing into `cancelled`.
+    let mut went_back = false;
+    let mut abandoned = false;
 
     let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
     let Ok(mut terminal) = ratatui::Terminal::new(backend) else {
@@ -159,7 +240,7 @@ fn run_browser(title: &str, entries: &[Entry], mode: Mode, prechecked: &[usize])
     };
 
     use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-    while !confirmed && !cancelled {
+    while !confirmed && !went_back && !abandoned {
         let _ = terminal.draw(|f| {
             let chunks = Layout::vertical([
                 Constraint::Percentage(52),
@@ -213,9 +294,19 @@ fn run_browser(title: &str, entries: &[Entry], mode: Mode, prechecked: &[usize])
             );
             f.render_widget(details, chunks[1]);
 
-            let hints = match mode {
-                Mode::Single => "↑↓ Navigate · Enter Select · q Cancel",
-                Mode::Multi => "↑↓ Move · Space Toggle · a All/None · Enter Confirm · q Cancel",
+            // An explicit hint from the caller wins, so a screen that steps back
+            // on Esc can advertise it; otherwise fall back to the per-mode text.
+            let hints = match hint {
+                Some(h) => h.to_string(),
+                None => match mode {
+                    Mode::Single => "↑↓ Navigate · Enter Select · q Cancel",
+                    // Mirrors `multi_hint`: Enter picks the highlighted row
+                    // when nothing is checked, Space is for picking more.
+                    Mode::Multi => {
+                        "↑↓ Move · ⏎ Pick This One · Space Adds More · a All/None · q Cancel"
+                    }
+                }
+                .to_string(),
             };
             f.render_widget(Paragraph::new(hints), chunks[2]);
         });
@@ -245,36 +336,101 @@ fn run_browser(title: &str, entries: &[Entry], mode: Mode, prechecked: &[usize])
             KeyCode::Char(' ') if mode == Mode::Multi => {
                 toggle_at(&mut checked, cursor);
             }
-            KeyCode::Esc | KeyCode::Char('q' | 'Q') => cancelled = true,
+            KeyCode::Esc | KeyCode::Char('q' | 'Q') => went_back = true,
             _ => {}
         }
         if ctrl_c {
-            cancelled = true;
+            abandoned = true;
         }
     }
 
     drop(guard);
 
-    if !cancelled {
-        match mode {
-            Mode::Single => return Outcome::Picked(cursor),
-            Mode::Multi => {
-                let picked = checked
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, v)| v.then_some(i))
-                    .collect();
-                return Outcome::Toggled(picked);
-            }
-        }
-    }
-    fallback()
+    outcome_for(confirmed, went_back, abandoned, mode, cursor, &checked)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// Enter must accept the selection. This is the regression guard for an
+    /// inverted condition that made Enter fall through to the "nothing chosen"
+    /// fallback, so every confirmation abandoned the flow — Enter behaved
+    /// exactly like Esc.
+    #[test]
+    fn enter_accepts_the_selection_in_single_mode() {
+        assert_eq!(
+            outcome_for(true, false, false, Mode::Single, 2, &[false; 3]),
+            Outcome::Picked(2)
+        );
+    }
+
+    #[test]
+    fn enter_returns_the_checked_items_in_multi_mode() {
+        let checked = [false, true, false, true];
+        assert_eq!(
+            outcome_for(true, false, false, Mode::Multi, 0, &checked),
+            Outcome::Toggled(vec![1, 3])
+        );
+    }
+
+    #[test]
+    fn enter_on_an_unchecked_row_picks_it_in_multi_mode() {
+        // Space is only needed for more than one. Without this, Enter with
+        // nothing checked returned an empty selection, which every caller
+        // treats as aborting the run, so Enter looked like it did nothing.
+        assert_eq!(
+            outcome_for(true, false, false, Mode::Multi, 1, &[false; 3]),
+            Outcome::Toggled(vec![1])
+        );
+    }
+
+    #[test]
+    fn esc_steps_back_without_consuming_the_selection() {
+        let checked = [true, false];
+        assert_eq!(
+            outcome_for(false, true, false, Mode::Single, 1, &checked),
+            Outcome::Back
+        );
+        assert_eq!(
+            outcome_for(false, true, false, Mode::Multi, 0, &checked),
+            Outcome::Back,
+            "Esc is 'go back', not 'choose nothing'"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_abandons_rather_than_stepping_back() {
+        assert_eq!(
+            outcome_for(false, false, true, Mode::Single, 0, &[false; 2]),
+            Outcome::Abandoned
+        );
+    }
+
+    /// An unsettled loop means the screen was never usable, so no selection
+    /// happened — distinct from a confirmed empty multi-select.
+    #[test]
+    fn unsettled_loop_yields_no_selection() {
+        assert_eq!(
+            outcome_for(false, false, false, Mode::Single, 1, &[false; 2]),
+            Outcome::Quit
+        );
+        assert_eq!(
+            outcome_for(false, false, false, Mode::Multi, 0, &[false; 2]),
+            Outcome::Toggled(vec![])
+        );
+    }
+
+    /// Ctrl+C wins over a simultaneous Back, since abandoning is the stronger
+    /// signal and the loop can end on both.
+    #[test]
+    fn abandon_takes_precedence_over_back() {
+        assert_eq!(
+            outcome_for(false, true, true, Mode::Single, 0, &[false]),
+            Outcome::Abandoned
+        );
+    }
 
     #[test]
     fn toggles_are_local_and_all_flips_both_ways() {

@@ -38,8 +38,12 @@ impl<T: std::fmt::Display + Clone> DecoratedSelect<T> {
             .collect();
         let title = self.prompt.clone();
         match crate::cli::interactive::menu::pick_single(&title, opts) {
-            Some(idx) => Ok(self.options[idx].clone()),
-            None => Err(inquire::InquireError::OperationCanceled),
+            crate::cli::interactive::menu::Step::Value(idx) => Ok(self.options[idx].clone()),
+            // Outside a multi-step flow Esc and Ctrl+C both mean "leave".
+            crate::cli::interactive::menu::Step::Back
+            | crate::cli::interactive::menu::Step::Cancel => {
+                Err(inquire::InquireError::OperationCanceled)
+            }
         }
     }
 }
