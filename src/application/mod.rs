@@ -6,5 +6,6 @@ pub mod integrity;
 pub mod media_scan;
 pub mod runlog;
 pub mod scraper;
+pub mod threads_archive;
 
 pub use scraper::ScrapeRequest;

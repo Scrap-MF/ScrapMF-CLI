@@ -298,12 +298,15 @@ pub fn scrape_with_hooks(
     }
 
     // ── Download archive (dedup) ────────────────────────────────────────────
-    // Canonical store is ours (JSONL per site/account); the sqlite passed to
-    // gallery-dl is a disposable cache seeded from it before the run and
-    // drained back into the JSONL afterwards.
+    // Canonical store is ours (JSONL per site/account). gallery-dl reads a
+    // disposable sqlite cache seeded from it and drained back afterwards;
+    // threads keeps its own ledger beside the media, so ours is bridged into
+    // it directly instead. Both end up in the same JSONL.
     let mut req = req.clone();
     let mut archive_keys: std::collections::HashSet<String> = Default::default();
+    // (our entries JSONL, the store this provider was actually given)
     let mut archive_files: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
+    let mut threads_ledger: Option<std::path::PathBuf> = None;
     if !req.no_archive && req.archive.is_none() && !dry_run {
         use crate::application::archive;
         let enabled = crate::config::load()
@@ -311,24 +314,47 @@ pub fn scrape_with_hooks(
             .unwrap_or(true);
         if enabled
             && let Some((site, account)) = archive::site_account_from_url(&req.url)
-            && let (Some(entries), Some(cache)) = (
-                archive::entries_path(&site, &account),
-                archive::cache_path(&site, &account),
-            )
+            && let Some(entries) = archive::entries_path(&site, &account)
         {
             archive_keys = archive::load_keys(&entries).unwrap_or_default();
-            match archive::seed_cache(&cache, &archive_keys) {
-                Ok(()) => {
-                    tracing::debug!(
-                        site = %site, account = %account,
-                        keys = archive_keys.len(),
-                        "archive cache seeded"
-                    );
-                    req.archive = Some(cache.clone());
-                    archive_files = Some((entries, cache));
+            if is_threads_url(&req.url) {
+                // The plugin resolves its ledger from `--dest`, so the dest has
+                // to be derived exactly as the provider derives it. Without an
+                // explicit output the plugin falls back to `dl` in the cwd,
+                // which is not a path worth guessing at.
+                if let Some(out) = &req.output {
+                    let dest = crate::config::expand_output_dir(out);
+                    let ledger = crate::application::threads_archive::ledger_path(&dest);
+                    match crate::application::threads_archive::inject(&ledger, &archive_keys) {
+                        Ok(n) => tracing::debug!(
+                            site = %site, account = %account,
+                            keys = archive_keys.len(), injected = n,
+                            "threads ledger seeded from archive"
+                        ),
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "could not seed the threads ledger — proceeding without dedup"
+                        ),
+                    }
+                    // Its presence is what makes the provider pass `--archive`.
+                    req.archive = Some(ledger.clone());
+                    archive_files = Some((entries, ledger.clone()));
+                    threads_ledger = Some(ledger);
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "could not seed download archive — proceeding without dedup");
+            } else if let Some(cache) = archive::cache_path(&site, &account) {
+                match archive::seed_cache(&cache, &archive_keys) {
+                    Ok(()) => {
+                        tracing::debug!(
+                            site = %site, account = %account,
+                            keys = archive_keys.len(),
+                            "archive cache seeded"
+                        );
+                        req.archive = Some(cache.clone());
+                        archive_files = Some((entries, cache));
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not seed download archive — proceeding without dedup");
+                    }
                 }
             }
         }
@@ -394,10 +420,17 @@ pub fn scrape_with_hooks(
         anyhow::bail!("scrape failed: {details}");
     }
 
-    // Drain the cache: keys gallery-dl inserted this run become permanent
-    // JSONL entries. Best-effort — a failure here must not fail the scrape.
-    if let Some((entries, cache)) = archive_files {
-        match crate::application::archive::drain_cache(&cache) {
+    // Drain the store the provider actually wrote: keys gallery-dl inserted
+    // this run become permanent JSONL entries, and for threads the plugin's
+    // ledger is read back the same way. Best-effort — a failure here must not
+    // fail the scrape.
+    if let Some((entries, store)) = archive_files {
+        let drained = if threads_ledger.is_some() {
+            crate::application::threads_archive::drain(&store).map_err(anyhow::Error::from)
+        } else {
+            crate::application::archive::drain_cache(&store)
+        };
+        match drained {
             Ok(all) => {
                 match crate::application::archive::append_entries(&entries, &archive_keys, all) {
                     Ok(n) if n > 0 => {
@@ -407,7 +440,13 @@ pub fn scrape_with_hooks(
                     Err(e) => tracing::warn!(error = %e, "could not append archive entries"),
                 }
             }
-            Err(e) => tracing::warn!(error = %e, "could not read download archive cache"),
+            Err(e) => {
+                if threads_ledger.is_some() {
+                    tracing::warn!(error = %e, "could not read the threads ledger");
+                } else {
+                    tracing::warn!(error = %e, "could not read download archive cache");
+                }
+            }
         }
     }
     Ok(outcome)

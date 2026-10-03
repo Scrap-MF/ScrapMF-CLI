@@ -3,6 +3,18 @@ use std::path::PathBuf;
 
 use super::{Provider, ScrapeRequest};
 
+/// First line of `--help` that carries text, or `"threadstractor"`.
+///
+/// Separate from the process call so it is testable without the binary.
+fn version_line(help_out: &str) -> String {
+    help_out
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("threadstractor")
+        .to_string()
+}
+
 /// Provider for Threads via the `threadstractor` Python package.
 /// Mirrors gallery-dl provider but calls the threadstractor binary
 /// which handles `post_id` naming, `date` sorting and anti rate-limit.
@@ -32,17 +44,27 @@ impl Provider for Threadstractor {
 
     fn version(&self) -> anyhow::Result<String> {
         let (bin, prefix) = Self::binary_with_fallback()?;
+
+        // Prefer `--version`. It was added after the pin moved to v1.2.0, so the
+        // fallback is not dead code: an older install answers with an error.
+        let mut vargs = prefix.clone();
+        vargs.push(OsString::from("--version"));
+        if let Ok(out) = crate::process::Executor::run_capturing(&bin, &vargs) {
+            let v = String::from_utf8_lossy(&out.stdout);
+            let line = v.lines().map(str::trim).find(|l| !l.is_empty());
+            if let Some(line) = line {
+                return Ok(line.to_string());
+            }
+        }
+
         let mut args = prefix;
         args.push(OsString::from("--help"));
         let output = crate::process::Executor::run_capturing(&bin, &args)?;
-        // threadstractor --help prints usage, no --version yet, return first line
+        // The help output is a `rich` panel that opens with a blank line of
+        // padding, so the first line is whitespace. Take the first line with
+        // something on it instead of the first line.
         let out = String::from_utf8_lossy(&output.stdout);
-        Ok(out
-            .lines()
-            .next()
-            .unwrap_or("threadstractor")
-            .trim()
-            .to_string())
+        Ok(version_line(&out))
     }
 
     #[allow(clippy::collapsible_if)]
@@ -63,9 +85,13 @@ impl Provider for Threadstractor {
             args.push(OsString::from("--profile-pic-only"));
         }
 
-        // Archive: threadstractor doesn't have its own archive yet (deferred), but
-        // scrapmf will manage dedup via its JSONL if we pass --download-archive in future.
-        // For now ignore archive param (scrapmf's archive still seeds/skips via its own logic).
+        // Archive: the plugin grew its own ledger (`--archive`, v1.2.0). scrapmf
+        // keeps ownership of the canonical record and bridges the two — see
+        // `crate::application::threads_archive` — so enabling it here is what
+        // makes the plugin consult and update its ledger.
+        if req.archive.is_some() {
+            args.push(OsString::from("--archive"));
+        }
 
         // Rate limit -> threadstractor flags
         if let Some(ref rl) = req.rate_limit {
@@ -208,9 +234,40 @@ fn parse_sleep_to_ms(s: &str) -> Option<u64> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::Threadstractor;
+    use super::{Threadstractor, version_line};
     use crate::application::ScrapeRequest;
     use crate::providers::Provider;
+
+    #[test]
+    fn version_line_skips_the_padding_line() {
+        // The plugin's `--help` is a `rich` panel that starts with a line of
+        // spaces. Reading the first line verbatim yielded an empty version.
+        let help = "                    \n Usage: threadstractormf [OPTIONS]\n";
+        assert_eq!(version_line(help), "Usage: threadstractormf [OPTIONS]");
+        assert_eq!(version_line("\n\n  \n"), "threadstractor");
+    }
+
+    #[test]
+    fn archive_flag_follows_the_request() {
+        let mut r = req("https://www.threads.net/@user/media");
+        assert!(
+            !Threadstractor
+                .build_args(&r)
+                .unwrap()
+                .iter()
+                .any(|a| a == "--archive"),
+            "no archive requested, no ledger written"
+        );
+        r.archive = Some(std::path::PathBuf::from("/tmp/cache.sqlite"));
+        assert!(
+            Threadstractor
+                .build_args(&r)
+                .unwrap()
+                .iter()
+                .any(|a| a == "--archive"),
+            "archive requested, the plugin must keep its ledger"
+        );
+    }
 
     fn req(url: &str) -> ScrapeRequest {
         ScrapeRequest {
