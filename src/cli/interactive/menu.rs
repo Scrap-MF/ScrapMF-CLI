@@ -236,11 +236,12 @@ fn confirm_key(key: crossterm::event::KeyCode, destructive: bool) -> Option<Step
     match key {
         // Enter takes the safe path: yes normally, no when destructive.
         KeyCode::Enter => Some(Step::Value(!destructive)),
-        // The explicit letters only exist where consent is not the default.
-        // An ordinary question is one Enter away, so keeping `y`/`n` there
-        // would only offer a second way to reach the same answer.
-        KeyCode::Char('y' | 'Y') if destructive => Some(Step::Value(true)),
-        KeyCode::Char('n' | 'N') if destructive => Some(Step::Value(false)),
+        KeyCode::Char('y' | 'Y') => Some(Step::Value(true)),
+        // `n` answers no on both kinds of question. On an ordinary question it
+        // is the only way to say no at all — dropping it in favour of Enter
+        // left questions like "add another account?" answerable only with yes
+        // or Esc, which is no way to decline.
+        KeyCode::Char('n' | 'N') => Some(Step::Value(false)),
         KeyCode::Esc => Some(Step::Back),
         _ => None,
     }
@@ -273,7 +274,7 @@ pub fn confirm_box(
         // Enter always answers "no" here, so the hint spells out `y`.
         "⏎ no · y yes · n no · esc back"
     } else {
-        "⏎ yes · esc back"
+        "⏎ yes · n no · esc back"
     };
 
     let mut boxed = match BoxedPrompt::enter(context) {
@@ -674,11 +675,23 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_questions_have_one_answer_key() {
-        // `y`/`n` only exist where consent is not the default; on an ordinary
-        // question Enter already answers it, so the letters must stay inert.
-        assert_eq!(confirm_key(KeyCode::Char('y'), false), None);
-        assert_eq!(confirm_key(KeyCode::Char('n'), false), None);
+    fn an_ordinary_question_can_still_be_declined() {
+        // Enter answers yes in one keystroke, but a question whose answer is
+        // often "no" needs a way to say so that is not Esc — Esc means "step
+        // back" everywhere else, and a caller that maps it to `false` is
+        // leaning on a side effect rather than a designed answer.
+        assert_eq!(
+            confirm_key(KeyCode::Char('n'), false),
+            Some(Step::Value(false))
+        );
+        assert_eq!(
+            confirm_key(KeyCode::Char('N'), false),
+            Some(Step::Value(false))
+        );
+        assert_eq!(
+            confirm_key(KeyCode::Char('y'), false),
+            Some(Step::Value(true))
+        );
     }
 
     #[test]

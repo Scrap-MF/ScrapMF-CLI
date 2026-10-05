@@ -901,7 +901,7 @@ pub fn write_profile_file(path: &Path, profile: &Profile) -> anyhow::Result<()> 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod task_file_tests {
     use super::*;
-    use crate::config::Account;
+    use crate::config::{Account, TaskAccount};
     use std::path::PathBuf;
 
     fn tmp(name: &str) -> PathBuf {
@@ -911,24 +911,29 @@ mod task_file_tests {
         dir
     }
 
+    fn account(username: &str, cookies: Option<&str>, kinds: &[&str]) -> TaskAccount {
+        TaskAccount {
+            account: Account {
+                username: Some(username.into()),
+                cookie_profile: cookies.map(str::to_string),
+                ..Default::default()
+            },
+            kinds: kinds.iter().map(|k| k.to_string()).collect(),
+        }
+    }
+
     fn sample() -> Task {
-        let accounts = vec![
-            Account {
-                username: Some("one".into()),
-                cookie_profile: Some("friend_session".into()),
-                ..Default::default()
-            },
-            Account {
-                username: Some("two".into()),
-                ..Default::default()
-            },
-        ];
         let mut map = std::collections::HashMap::new();
-        map.insert("instagram".to_string(), accounts);
+        map.insert(
+            "instagram".to_string(),
+            vec![
+                account("one", Some("friend_session"), &["Stories"]),
+                account("two", None, &["Reels"]),
+            ],
+        );
         Task {
             task: Some("colegio".into()),
             display_name: Some("historias del colegio".into()),
-            kinds: vec!["Stories".into(), "Highlights".into()],
             accounts: map,
         }
     }
@@ -942,15 +947,32 @@ mod task_file_tests {
 
         assert_eq!(back.task.as_deref(), Some("colegio"));
         assert_eq!(back.display_name.as_deref(), Some("historias del colegio"));
-        // Kinds stay as the labels the site registry speaks, so a site that
-        // does not offer one can be filtered without a serde migration.
-        assert_eq!(back.kinds, vec!["Stories", "Highlights"]);
         let accs = &back.accounts["instagram"];
         assert_eq!(accs.len(), 2);
-        assert_eq!(accs[0].username.as_deref(), Some("one"));
-        assert_eq!(accs[0].cookie_profile.as_deref(), Some("friend_session"));
-        assert_eq!(accs[1].username.as_deref(), Some("two"));
-        assert!(accs[1].cookie_profile.is_none());
+        assert_eq!(accs[0].account.username.as_deref(), Some("one"));
+        assert_eq!(
+            accs[0].account.cookie_profile.as_deref(),
+            Some("friend_session")
+        );
+        // Content is per account: the flattened account fields must not have
+        // swallowed the kinds beside them.
+        assert_eq!(accs[0].kinds, vec!["Stories"]);
+        assert_eq!(accs[1].account.username.as_deref(), Some("two"));
+        assert!(accs[1].account.cookie_profile.is_none());
+        assert_eq!(accs[1].kinds, vec!["Reels"]);
+    }
+
+    #[test]
+    fn account_fields_and_kinds_sit_side_by_side() {
+        // The point of `flatten`: a task account reads like a profile account
+        // with kinds next to it, not nested under an `account` table.
+        let dir = tmp("flatten");
+        let path = dir.join("f.toml");
+        write_task_file(&path, &sample()).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("username = \"one\""), "{body}");
+        assert!(body.contains("kinds = [\"Stories\"]"), "{body}");
+        assert!(!body.contains("[accounts.instagram.account]"), "{body}");
     }
 
     #[test]
@@ -962,8 +984,7 @@ mod task_file_tests {
         let task = Task {
             task: Some("bare".into()),
             display_name: None,
-            kinds: vec!["Posts".into()],
-            accounts: std::collections::HashMap::new(),
+            accounts: Default::default(),
         };
         write_task_file(&path, &task).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
@@ -978,15 +999,27 @@ mod task_file_tests {
         let mut task = sample();
         task.accounts.insert(
             "tiktok".to_string(),
-            vec![Account {
-                username: Some("three".into()),
-                ..Default::default()
-            }],
+            vec![account("three", None, &["Videos"])],
         );
         write_task_file(&path, &task).unwrap();
         let back: Task = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(back.accounts.len(), 2);
         assert!(back.accounts.contains_key("instagram"));
         assert!(back.accounts.contains_key("tiktok"));
+    }
+
+    #[test]
+    fn an_account_may_name_content_its_site_cannot_fetch() {
+        // Written by hand, or kept across a registry change: it must still
+        // load, so the account can be reported and skipped at run time.
+        let dir = tmp("stale");
+        let path = dir.join("stale.toml");
+        std::fs::write(
+            &path,
+            "task = \"stale\"\n\n[[accounts.tiktok]]\nusername = \"x\"\nkinds = [\"Stories\"]\n",
+        )
+        .unwrap();
+        let back: Task = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back.accounts["tiktok"][0].kinds, vec!["Stories"]);
     }
 }

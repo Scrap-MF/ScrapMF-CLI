@@ -1,22 +1,39 @@
-//! Saved content batches: a name, the content it wants, and who to get it from.
+//! Saved content batches: a name, the accounts to run it on, and what each one
+//! wants.
 //!
-//! A task answers "what and for whom"; a profile answers "how", with per-run
+//! A task answers *what and for whom*; a profile answers *how*, with per-run
 //! content choices and per-site overrides. They are separate on purpose —
-//! separate directory, separate struct, separate menus — even though both speak
-//! [`crate::config::Account`] so cookie sessions behave the same in each.
+//! separate directory, struct, menus and flows — but both speak
+//! [`config::Account`], so a cookie session behaves the same in each.
 //!
-//! A task may span networks, and its kinds are a *filter* rather than an
-//! instruction: each account gets the intersection of what the task asked for
-//! and what its site actually supports. A task spanning Instagram and TikTok
-//! asking for stories downloads the Instagram stories and says plainly that it
-//! dropped the TikTok account, instead of silently fetching something else.
+//! Content belongs to the account, not the task: the wizard asks site → account
+//! → content per account, so two instagram accounts in one task can want
+//! different things. A task may span networks, and the kinds are a *filter*
+//! rather than an instruction — each account is validated against what its site
+//! actually supports, and one that cannot serve the request is named and
+//! skipped instead of silently fetching something else.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::cli::interactive::menu::{self, Step};
 use crate::cli::interactive::theme;
-use crate::config::{self, Account, Task};
+use crate::config::{self, Task, TaskAccount};
+
+/// What a finished wizard did.
+enum Created {
+    Saved(String),
+    /// The user stepped out; nothing was written.
+    Cancelled,
+}
+
+/// What the menu can do with a saved task.
+enum TaskAction {
+    Run,
+    Edit,
+    Delete,
+    Back,
+}
 
 /// List saved tasks and act on one.
 pub(super) fn tasks_menu() {
@@ -31,16 +48,11 @@ pub(super) fn tasks_menu() {
             let t = &tasks[name];
             let accounts: usize = t.accounts.values().map(|v| v.len()).sum();
             let sites = t.accounts.len();
-            let kinds = if t.kinds.is_empty() {
-                "no content chosen".to_string()
-            } else {
-                t.kinds.join(", ")
-            };
             entries.push((
                 theme::brand_site_label(name),
                 vec![
-                    format!("content: {kinds}"),
-                    format!("{accounts} account(s) across {sites} site(s)"),
+                    format!("{} account(s) across {sites} site(s)", accounts),
+                    describe_task(t),
                 ],
             ));
         }
@@ -49,7 +61,7 @@ pub(super) fn tasks_menu() {
             vec![
                 "Pick the content once, then reuse it.".to_string(),
                 String::new(),
-                "One or more accounts, each with its own".to_string(),
+                "Each account gets its own content and".to_string(),
                 "cookie session.".to_string(),
             ],
         ));
@@ -63,107 +75,194 @@ pub(super) fn tasks_menu() {
             Step::Back | Step::Cancel => return,
         };
         match picked {
-            i if i == create_idx => {
-                create_task();
-                super::clear_screen();
-            }
+            i if i == create_idx => match create_task(None) {
+                Created::Saved(name) => println!("✔ task '{name}' saved"),
+                Created::Cancelled => println!("— cancelled, nothing saved"),
+            },
             i if i == back_idx => return,
             i => {
                 let id = names[i].clone();
-                let t = &tasks[&id];
-                match run_task(t, &cfg) {
-                    Step::Value(()) => super::clear_screen(),
-                    // Esc at the preview steps back inside the task, not out of
-                    // the list, so a wrong cookie choice can be fixed by
-                    // editing rather than starting over.
-                    Step::Back | Step::Cancel => {}
-                }
+                task_menu(&id, &tasks[&id], &cfg);
             }
         }
     }
 }
 
-/// Create a task: name, then accounts, then what content to fetch.
-fn create_task() {
-    let Some(name) = ask_task_name() else {
-        return;
+/// What one can do with a single task.
+fn task_menu(id: &str, task: &Task, cfg: &config::Config) {
+    let action = {
+        let entries = vec![
+            (
+                "Run".to_string(),
+                vec![
+                    String::new(),
+                    "Media lands under the task name.".to_string(),
+                ],
+            ),
+            (
+                "Edit".to_string(),
+                vec![
+                    "Rewalk the wizard with today's accounts.".to_string(),
+                    String::new(),
+                ],
+            ),
+            (
+                "Delete".to_string(),
+                vec!["Removes the saved task.".to_string(), String::new()],
+            ),
+            ("Back".to_string(), vec![String::new()]),
+        ];
+        let picked = menu::pick_single(&theme::brand_site_label(id), entries);
+        match picked {
+            Step::Value(0) => TaskAction::Run,
+            Step::Value(1) => TaskAction::Edit,
+            Step::Value(2) => TaskAction::Delete,
+            Step::Value(_) => TaskAction::Back,
+            Step::Back | Step::Cancel => TaskAction::Back,
+        }
     };
-    let Some(path) = config::tasks_dir().map(|d| d.join(format!("{name}.toml"))) else {
-        crate::output::print_error("no se pudo localizar el directorio de tareas");
-        return;
+    match action {
+        TaskAction::Run => {
+            match run_task(task, cfg) {
+                Step::Value(()) => super::clear_screen(),
+                // Esc at the preview steps back inside the task rather than
+                // out of the list.
+                Step::Back | Step::Cancel => {}
+            }
+        }
+        TaskAction::Edit => match create_task(Some(task.clone())) {
+            Created::Saved(name) => println!("✔ task '{name}' updated"),
+            Created::Cancelled => println!("— unchanged"),
+        },
+        TaskAction::Delete => {
+            // Destructive: Enter keeps it, `y` deletes it.
+            let sure = menu::confirm_back("Tasks", &format!("delete task '{id}'?"), false, true)
+                .value()
+                .unwrap_or(false);
+            if sure && let Some(dir) = config::tasks_dir() {
+                let path = dir.join(format!("{id}.toml"));
+                match std::fs::remove_file(&path) {
+                    Ok(()) => println!("✔ task '{id}' deleted"),
+                    Err(e) => crate::output::print_error(&format!("could not delete '{id}': {e}")),
+                }
+            }
+        }
+        TaskAction::Back => {}
+    }
+}
+
+/// The wizard: name, then site → account → content, until the user saves.
+///
+/// `existing` restarts the account list for [`TaskAction::Edit`], so editing is
+/// the same walk rather than a second, divergent flow. `Esc` steps back one
+/// question at every level and keeps what was typed, matching every other flow.
+fn create_task(existing: Option<Task>) -> Created {
+    let editing = existing.is_some();
+    let (name, mut accounts) = match existing {
+        Some(t) => {
+            let id = t.task.clone().unwrap_or_else(|| "task".to_string());
+            (id, t.accounts)
+        }
+        None => match ask_task_name() {
+            Some(n) => (n, std::collections::HashMap::new()),
+            None => return Created::Cancelled,
+        },
     };
-    if path.exists() {
-        crate::output::print_error(&format!("la tarea '{name}' ya existe"));
-        return;
+
+    let site_opts = crate::cli::interactive::scrape_flow::site_options_with_fallbacks(&[]);
+    if site_opts.is_empty() {
+        crate::output::print_error("no sites configured — add one under Configuration first");
+        return Created::Cancelled;
     }
 
-    // Accounts, each with its own cookie session.
-    let site_opts = crate::cli::interactive::scrape_flow::site_options_with_fallbacks(&[]);
-    let mut accounts: std::collections::HashMap<String, Vec<Account>> =
-        std::collections::HashMap::new();
     loop {
-        let site_list: Vec<(String, Vec<String>)> = site_opts
-            .iter()
-            .map(|s| {
-                let spec = crate::sites::registry::find_by_id(s);
-                let details = spec
-                    .map(|sp| {
-                        vec![
-                            format!("kinds: {}", sp.content_kinds.join(", ")),
-                            format!("backend: {:?}", sp.backend),
-                        ]
-                    })
-                    .unwrap_or_else(|| vec!["custom site (sites/*.toml)".to_string()]);
-                (theme::brand_site_label(s), details)
-            })
-            .collect();
-        let idx = match menu::pick_single_back("New task ─ site", site_list) {
-            Step::Value(i) => i,
-            Step::Back | Step::Cancel => return,
+        let site = match ask_site(&name, &site_opts) {
+            Some(s) => s,
+            // First question of the loop: Esc leaves the wizard.
+            None => {
+                if accounts.is_empty() {
+                    return Created::Cancelled;
+                }
+                // Mid-loop, Esc backs out to the last saved question.
+                return finish(&name, accounts, editing);
+            }
         };
-        let site = site_opts[idx].clone();
 
-        let Some(username) = ask_username(&site) else {
-            return;
+        let username = match ask_username(&site) {
+            Some(u) => u,
+            None => continue,
         };
         let cookies = pick_cookie_for(&site);
-        let mut account = Account {
-            username: Some(username.clone()),
-            ..Default::default()
+        let kinds = match ask_kinds(&site) {
+            Some(k) => k,
+            None => continue,
         };
-        account.cookie_profile = cookies;
-        accounts.entry(site).or_default().push(account);
 
-        let more = menu::confirm_back(
-            "New task",
-            &format!("add another account to '{}'?", name),
-            true,
-            false,
-        )
-        .value()
-        .unwrap_or(false);
-        if !more {
-            break;
+        let mut account = TaskAccount::default();
+        account.account.username = Some(username.clone());
+        account.account.cookie_profile = cookies;
+        account.kinds = kinds;
+        let slot = accounts.entry(site).or_default();
+        slot.push(account);
+
+        // Two positive actions rather than a yes/no: there is no "no" to
+        // express, and Enter takes the highlighted row — the first one saves.
+        let choice = menu::pick_single(
+            &format!("New task ─ {name}"),
+            vec![
+                (
+                    format!("Save task '{name}'"),
+                    vec![format!("{} account(s) so far", total(&accounts))],
+                ),
+                (
+                    "Add another account".to_string(),
+                    vec!["Site, account and content again.".to_string()],
+                ),
+            ],
+        );
+        match choice {
+            Step::Value(0) => return finish(&name, accounts, editing),
+            Step::Value(_) => {}
+            // Esc steps back to the content question.
+            Step::Back => continue,
+            Step::Cancel => return finish(&name, accounts, editing),
         }
     }
+}
 
-    // Kinds are chosen once, from everything the sites involved can do.
-    let mut sites: Vec<String> = accounts.keys().cloned().collect();
-    sites.sort();
-    let kinds = match ask_kinds(&sites) {
-        Some(k) => k,
-        None => return,
+fn total(accounts: &std::collections::HashMap<String, Vec<TaskAccount>>) -> usize {
+    accounts.values().map(|v| v.len()).sum()
+}
+
+fn finish(
+    name: &str,
+    accounts: std::collections::HashMap<String, Vec<TaskAccount>>,
+    editing: bool,
+) -> Created {
+    if accounts.is_empty() {
+        println!("— no accounts, nothing saved");
+        return Created::Cancelled;
+    }
+    let Some(dir) = config::tasks_dir() else {
+        crate::output::print_error("could not locate the tasks directory");
+        return Created::Cancelled;
     };
-
+    let path = dir.join(format!("{name}.toml"));
+    if !editing && path.exists() {
+        crate::output::print_error(&format!("task '{name}' already exists"));
+        return Created::Cancelled;
+    }
     let task = Task {
-        task: Some(name.clone()),
-        display_name: Some(name.clone()),
-        kinds,
+        task: Some(name.to_string()),
+        display_name: Some(name.to_string()),
         accounts,
     };
     match config::write_task_file(&path, &task) {
-        Ok(()) => println!("✔ tarea '{name}' guardada"),
-        Err(e) => crate::output::print_error(&format!("no se pudo guardar la tarea: {e}")),
+        Ok(()) => Created::Saved(name.to_string()),
+        Err(e) => {
+            crate::output::print_error(&format!("could not save the task: {e}"));
+            Created::Cancelled
+        }
     }
 }
 
@@ -185,7 +284,7 @@ fn ask_task_name() -> Option<String> {
             println!("⚠ the task needs a name");
             continue;
         }
-        // Same rules as profile ids: the name becomes a filename.
+        // Same rules as profile ids: the name becomes a folder name.
         if name.contains('/') || name.contains('.') || name.contains('\\') {
             println!("⚠ no / . or \\ in a task name — it becomes a folder");
             continue;
@@ -194,10 +293,32 @@ fn ask_task_name() -> Option<String> {
     }
 }
 
+fn ask_site(task: &str, site_opts: &[String]) -> Option<String> {
+    let site_list: Vec<(String, Vec<String>)> = site_opts
+        .iter()
+        .map(|s| {
+            let details = crate::sites::registry::find_by_id(s)
+                .map(|sp| {
+                    vec![
+                        format!("kinds: {}", sp.content_kinds.join(", ")),
+                        format!("backend: {:?}", sp.backend),
+                    ]
+                })
+                .unwrap_or_else(|| vec!["custom site (sites/*.toml)".to_string()]);
+            (theme::brand_site_label(s), details)
+        })
+        .collect();
+    let picked = menu::pick_single_back(&format!("Task '{task}' ─ site"), site_list);
+    match picked {
+        Step::Value(i) => site_opts.get(i).cloned(),
+        Step::Back | Step::Cancel => None,
+    }
+}
+
 fn ask_username(site: &str) -> Option<String> {
     loop {
         let raw = menu::input_text_back(
-            &format!("New task ─ {site}"),
+            &format!("Task ─ {site}"),
             "Username:",
             "someone",
             "no @ needed",
@@ -228,14 +349,7 @@ fn pick_cookie_for(site: &str) -> Option<String> {
         return None;
     }
     let sites = vec![site.to_string()];
-    let mut ranked: Vec<(bool, String)> = stored
-        .into_iter()
-        .map(|name| {
-            let matches = cookies::has_cookies_for(&name, &sites);
-            (matches, name)
-        })
-        .collect();
-    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let ranked = rank_cookie_profiles(stored, &sites);
 
     let mut entries: Vec<(String, Vec<String>)> = Vec::new();
     entries.push((
@@ -261,9 +375,23 @@ fn pick_cookie_for(site: &str) -> Option<String> {
     }
 }
 
-/// Pick content from everything the sites involved can do.
-fn ask_kinds(sites: &[String]) -> Option<Vec<String>> {
-    let options = union_kind_options(sites);
+/// Stored profiles, the ones carrying cookies for `sites` first, then by name.
+fn rank_cookie_profiles(stored: Vec<String>, sites: &[String]) -> Vec<(bool, String)> {
+    use crate::config::cookies;
+    let mut ranked: Vec<(bool, String)> = stored
+        .into_iter()
+        .map(|name| {
+            let matches = cookies::has_cookies_for(&name, sites);
+            (matches, name)
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    ranked
+}
+
+/// Pick what this account wants, from its own site's menu.
+fn ask_kinds(site: &str) -> Option<Vec<String>> {
+    let options = crate::cli::interactive::content::content_options(site);
     if options.is_empty() {
         return Some(vec!["All".to_string()]);
     }
@@ -271,7 +399,7 @@ fn ask_kinds(sites: &[String]) -> Option<Vec<String>> {
         .iter()
         .map(|o| (o.to_string(), Vec::new()))
         .collect();
-    let idxs = match menu::pick_multi_back("New task ─ content", entries, &[]) {
+    let idxs = match menu::pick_multi_back(&format!("Task ─ {site} ─ content"), entries, &[]) {
         Step::Value(v) => v,
         Step::Back | Step::Cancel => return None,
     };
@@ -281,36 +409,15 @@ fn ask_kinds(sites: &[String]) -> Option<Vec<String>> {
         .collect();
     if picked.is_empty() {
         println!("⚠ pick at least one kind");
-        return ask_kinds(sites);
+        return ask_kinds(site);
     }
     Some(picked)
-}
-
-/// Every kind any of `sites` offers, `"All"` first, deduplicated.
-///
-/// A task spanning networks picks from the union, because the kinds are a
-/// filter each site applies for itself rather than an instruction to obey
-/// blindly.
-pub(super) fn union_kind_options(sites: &[String]) -> Vec<&'static str> {
-    let mut out: Vec<&'static str> = Vec::new();
-    for site in sites {
-        for k in crate::cli::interactive::content::content_options(site) {
-            if !out.contains(&k) {
-                out.push(k);
-            }
-        }
-    }
-    // Insertion order, not alphabetical: for a single-site task this is exactly
-    // the menu the user already knows from quick scrape. "All" leads because it
-    // is first in every site's menu.
-    out
 }
 
 /// Run a saved task.
 fn run_task(task: &Task, cfg: &config::Config) -> Step<()> {
     let cfg = cfg.clone();
     let task_id = task.task.clone().unwrap_or_else(|| "task".to_string());
-    let requested = resolve_requested_kinds(&task.kinds);
 
     let mut jobs = Vec::new();
     // Which job indices still need a session for this run, so the per-run
@@ -320,7 +427,8 @@ fn run_task(task: &Task, cfg: &config::Config) -> Step<()> {
     let mut sites: Vec<&String> = task.accounts.keys().collect();
     sites.sort();
     for site in sites {
-        for account in &task.accounts[site] {
+        for ta in &task.accounts[site] {
+            let account = &ta.account;
             let Some(username) = account
                 .username
                 .as_deref()
@@ -330,13 +438,14 @@ fn run_task(task: &Task, cfg: &config::Config) -> Step<()> {
                 println!("⚠ {site}: account without a username — skipped");
                 continue;
             };
+            let requested: HashSet<String> = ta.kinds.iter().cloned().collect();
             let kinds = kinds_for_site(site, &requested);
             if kinds.is_empty() {
                 // Name the account and the reason: a silent skip reads as
                 // "the task has nothing to fetch".
                 println!(
-                    "⚠ {site}:{username} — '{}' has no content this site can fetch — skipped",
-                    describe_kinds(&task.kinds)
+                    "⚠ {site}:{username} — {} has no content this site can fetch — skipped",
+                    describe_kinds(&ta.kinds)
                 );
                 continue;
             }
@@ -350,12 +459,11 @@ fn run_task(task: &Task, cfg: &config::Config) -> Step<()> {
                 site_cfg.as_ref(),
             );
             let pinned = account.cookie_profile.is_some() || cookies_file.is_some();
-            let kind_labels: Vec<crate::cli::interactive::content::ContentKind> = kinds.clone();
 
             let ctx = crate::cli::interactive::scrape_flow::AccountCtx {
                 site: site.clone(),
                 username: username.to_string(),
-                kinds: kind_labels,
+                kinds,
                 tagged,
                 directory_template: site_cfg.as_ref().and_then(|s| s.directory_template.clone()),
                 extractor_options: site_cfg
@@ -366,8 +474,8 @@ fn run_task(task: &Task, cfg: &config::Config) -> Step<()> {
                     .as_ref()
                     .map(|s| s.extra_args.clone())
                     .unwrap_or_default(),
-                cookies_file: cookies_file.clone(),
-                cookies_from_browser: cookies_from_browser.clone(),
+                cookies_file,
+                cookies_from_browser,
                 archive: site_cfg.as_ref().and_then(|s| s.archive.clone()),
                 rate_limit: site_cfg.as_ref().and_then(|s| s.rate_limit.clone()),
                 filename_template: site_cfg.as_ref().and_then(|s| s.filename_template.clone()),
@@ -398,11 +506,10 @@ fn run_task(task: &Task, cfg: &config::Config) -> Step<()> {
 
     // Only ask about the accounts the task did not already give a session.
     if !needs_session.is_empty() && std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-        let open_sites: Vec<String> = needs_session
+        let mut unique: Vec<String> = needs_session
             .iter()
             .filter_map(|i| jobs.get(*i).map(|(_, site, ..)| site.clone()))
             .collect();
-        let mut unique = open_sites.clone();
         unique.sort();
         unique.dedup();
         if let Some(file) = prompt_cookie_override(&unique) {
@@ -424,14 +531,7 @@ fn prompt_cookie_override(sites: &[String]) -> Option<PathBuf> {
     if stored.is_empty() {
         return None;
     }
-    let mut ranked: Vec<(bool, String)> = stored
-        .into_iter()
-        .map(|name| {
-            let matches = cookies::has_cookies_for(&name, sites);
-            (matches, name)
-        })
-        .collect();
-    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let ranked = rank_cookie_profiles(stored, sites);
 
     let mut entries: Vec<(String, Vec<String>)> = vec![(
         "Site default".to_string(),
@@ -459,22 +559,23 @@ fn prompt_cookie_override(sites: &[String]) -> Option<PathBuf> {
     }
 }
 
-/// Turn the stored labels into concrete kinds, resolving `"All"`.
-///
-/// `"All"` cannot expand here: what it means depends on the site, so each
-/// account resolves it against its own menu.
-fn resolve_requested_kinds(labels: &[String]) -> HashSet<String> {
-    labels.iter().cloned().collect()
-}
-
-/// What one account can actually get: the task's kinds minus what the site has
-/// no menu entry for, with `"All"` meaning everything this site supports.
+/// What one account can actually get: the content it asked for minus what the
+/// site has no menu entry for, with `"All"` meaning everything this site
+/// supports.
 fn kinds_for_site(
     site: &str,
     requested: &HashSet<String>,
 ) -> Vec<crate::cli::interactive::content::ContentKind> {
     use crate::cli::interactive::content::{ContentKind, content_options};
     let options = content_options(site);
+    if requested.is_empty() {
+        // A task written before kinds were per-account, or hand-edited.
+        return options
+            .iter()
+            .filter(|o| **o != "All")
+            .filter_map(|o| ContentKind::from_label(o))
+            .collect();
+    }
     if requested.contains("All") {
         return options
             .iter()
@@ -495,6 +596,35 @@ fn describe_kinds(labels: &[String]) -> String {
         "no content".to_string()
     } else {
         labels.join(", ")
+    }
+}
+
+/// One line describing what a task fetches, for the list.
+fn describe_task(task: &Task) -> String {
+    let mut per: Vec<String> = Vec::new();
+    let mut sites: Vec<&String> = task.accounts.keys().collect();
+    sites.sort();
+    for site in sites {
+        let mut kinds: Vec<&String> = task.accounts[site]
+            .iter()
+            .flat_map(|a| a.kinds.iter())
+            .collect();
+        kinds.sort();
+        kinds.dedup();
+        per.push(format!("{site}: {}", describe_kinds_owned(&kinds)));
+    }
+    per.join("  ")
+}
+
+fn describe_kinds_owned(labels: &[&String]) -> String {
+    if labels.is_empty() {
+        "no content".to_string()
+    } else {
+        labels
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -522,7 +652,6 @@ mod tests {
         let ig = kinds_for_site("instagram", &requested);
         let tiktok = kinds_for_site("tiktok", &requested);
         assert!(!ig.is_empty() && !tiktok.is_empty());
-        // Different menus, so "all" is not the same set per site.
         assert_ne!(
             ig.len(),
             tiktok.len(),
@@ -531,36 +660,65 @@ mod tests {
     }
 
     #[test]
-    fn a_site_with_no_menu_falls_back_without_dropping_everything() {
-        let requested: HashSet<String> = ["Posts".to_string(), "Stories".to_string()]
-            .into_iter()
-            .collect();
-        let kinds = kinds_for_site("unknown", &requested);
-        assert_eq!(
-            kinds.len(),
-            1,
-            "the fallback menu is All+Posts, so Posts survives"
+    fn two_accounts_can_want_different_things() {
+        // Content is per account, so one account asking for stories does not
+        // drag the other along — the whole reason kinds moved onto the account.
+        let stories: HashSet<String> = ["Stories".to_string()].into_iter().collect();
+        let reels: HashSet<String> = ["Reels".to_string()].into_iter().collect();
+        assert_eq!(kinds_for_site("instagram", &stories).len(), 1);
+        assert_eq!(kinds_for_site("instagram", &reels).len(), 1);
+        assert_ne!(
+            kinds_for_site("instagram", &stories),
+            kinds_for_site("instagram", &reels)
         );
     }
 
     #[test]
-    fn union_lists_all_first_then_dedupes() {
-        let union = union_kind_options(&["instagram".to_string(), "tiktok".to_string()]);
-        assert_eq!(union.first(), Some(&"All"), "All must lead the union");
-        let mut seen = std::collections::HashSet::new();
-        for k in &union {
-            assert!(seen.insert(*k), "duplicate kind {k} in the union");
-        }
-        // Stories only exists on instagram, but the task spanning both sites
-        // must still be able to ask for it.
-        assert!(union.contains(&"Stories"));
-        assert!(union.contains(&"Videos"), "tiktok's own kind is present");
+    fn a_stale_kind_skips_the_account_instead_of_failing() {
+        // A hand-edited task, or a site whose menu changed: the account is
+        // dropped and named, never silently given different content.
+        let gone: HashSet<String> = ["Nonsense".to_string()].into_iter().collect();
+        assert!(kinds_for_site("instagram", &gone).is_empty());
     }
 
     #[test]
-    fn union_of_one_site_matches_that_site_menu() {
-        let union = union_kind_options(&["tiktok".to_string()]);
-        let menu = crate::cli::interactive::content::content_options("tiktok");
-        assert_eq!(union, menu);
+    fn an_account_with_no_kinds_falls_back_to_the_whole_menu() {
+        let requested = HashSet::new();
+        assert!(
+            !kinds_for_site("instagram", &requested).is_empty(),
+            "a task written before kinds were per-account still runs"
+        );
+    }
+
+    #[test]
+    fn task_list_line_names_each_site_and_its_content() {
+        let mut task = Task {
+            task: Some("colegio".into()),
+            display_name: Some("colegio".into()),
+            accounts: Default::default(),
+        };
+        task.accounts.insert(
+            "instagram".into(),
+            vec![TaskAccount {
+                account: config::Account {
+                    username: Some("one".into()),
+                    ..Default::default()
+                },
+                kinds: vec!["Stories".into()],
+            }],
+        );
+        task.accounts.insert(
+            "tiktok".into(),
+            vec![TaskAccount {
+                account: config::Account {
+                    username: Some("two".into()),
+                    ..Default::default()
+                },
+                kinds: vec!["Videos".into()],
+            }],
+        );
+        let line = describe_task(&task);
+        assert!(line.contains("instagram: Stories"), "{line}");
+        assert!(line.contains("tiktok: Videos"), "{line}");
     }
 }

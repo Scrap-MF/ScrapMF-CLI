@@ -162,14 +162,25 @@ pub struct Task {
     pub task: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    /// Content to fetch. `"All"` expands per site when the task runs, so a task
-    /// spanning networks follows what each one actually supports.
-    #[serde(default)]
-    pub kinds: Vec<String>,
     /// Site key -> the accounts on it. Same shape as a profile, which is what
     /// lets both share account and cookie semantics.
     #[serde(default)]
-    pub accounts: std::collections::HashMap<String, Vec<Account>>,
+    pub accounts: std::collections::HashMap<String, Vec<TaskAccount>>,
+}
+
+/// An account inside a task: a plain account plus the content it wants.
+///
+/// The content lives here, not on the task, because it is asked per account —
+/// two instagram accounts in one task can want different things. Flattened so
+/// the file reads like a profile's account with `kinds` alongside.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TaskAccount {
+    #[serde(flatten)]
+    pub account: Account,
+    /// This account's content. `"All"` expands per site when the task runs, so
+    /// a task spanning networks follows what each one actually supports.
+    #[serde(default)]
+    pub kinds: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

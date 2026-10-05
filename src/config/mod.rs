@@ -2,7 +2,7 @@ pub mod cookies;
 pub mod model;
 
 pub(crate) use fs::restrict_perms;
-pub use model::{Account, Config, General, Preset, Profile, RateLimit, Site, Task};
+pub use model::{Account, Config, General, Preset, Profile, RateLimit, Site, Task, TaskAccount};
 
 use std::path::{Path, PathBuf};
 
