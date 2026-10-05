@@ -325,7 +325,12 @@ pub fn ensure_config_dirs() -> anyhow::Result<()> {
         std::fs::create_dir_all(&base).context("create scrapmf config dir")?;
         crate::config::fs::restrict_perms(&base, true);
     }
-    for d in [sites_dir(), profiles_dir()].into_iter().flatten() {
+    // tasks_dir() belongs here too: it is the only reason `tasks/*.toml` can be
+    // written at all, since the atomic writer does not create parents.
+    for d in [sites_dir(), profiles_dir(), tasks_dir()]
+        .into_iter()
+        .flatten()
+    {
         std::fs::create_dir_all(&d).with_context(|| format!("create {}", d.display()))?;
         crate::config::fs::restrict_perms(&d, true);
     }

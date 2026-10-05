@@ -876,7 +876,19 @@ pub fn ensure_facebook_site() -> anyhow::Result<()> {
 }
 
 /// Serialize a task to `path` with doc header and 0o600 perms.
+///
+/// Creates the parent directory: the atomic writer under this does not, so
+/// saving a task into a fresh install failed with NotFound and the error was
+/// invisible behind the menu's alternate screen.
 pub fn write_task_file(path: &Path, task: &Task) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        }
+    }
     let body = toml::to_string_pretty(task).context("serialize task")?;
     let header = format!(
         "# scrapmf task — {}\n# Saved content batch: fixed kinds, fixed accounts.\n\n",
@@ -973,6 +985,26 @@ mod task_file_tests {
         assert!(body.contains("username = \"one\""), "{body}");
         assert!(body.contains("kinds = [\"Stories\"]"), "{body}");
         assert!(!body.contains("[accounts.instagram.account]"), "{body}");
+    }
+
+    /// The test the roundtrip ones could never be: every other test in this
+    /// module creates its directory first, which is exactly what the app does
+    /// *not* do. A fresh install has no `tasks/`, and the atomic writer does
+    /// not create parents, so the save failed with NotFound — silently, behind
+    /// the menu's alternate screen.
+    #[test]
+    fn saving_a_task_creates_the_directory_it_needs() {
+        let root = std::env::temp_dir().join("scrapmf-task-file-mkdir");
+        let _ = std::fs::remove_dir_all(&root);
+        // No create_dir_all on purpose: two levels deep, neither existing.
+        let path = root.join("tasks").join("colegio.toml");
+        assert!(!root.exists());
+
+        write_task_file(&path, &sample()).unwrap();
+
+        let back: Task = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back.task.as_deref(), Some("colegio"));
+        assert_eq!(back.accounts["instagram"][0].kinds, vec!["Stories"]);
     }
 
     #[test]
