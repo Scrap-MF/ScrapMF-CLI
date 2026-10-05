@@ -200,54 +200,61 @@ fn create_task(existing: Option<Task>) -> Created {
         };
         previous_site = Some(site.clone());
 
-        // Esc here steps back to the site list.
-        let username = match ask_username(&site, previous_username.as_deref()) {
-            Some(u) => u,
-            None => continue 'account,
-        };
-        previous_username = Some(username.clone());
-
-        let cookies = pick_cookie_for(&site);
-        'detail: loop {
-            // Esc here steps back to the username, which keeps its text.
-            let kinds = match ask_kinds(&site, &previous_kinds) {
-                Some(k) => k,
-                None => continue 'detail,
+        // Its own level so the content question can escape back to it: the
+        // username is a question *before* the detail loop, not inside it.
+        'who: loop {
+            // Esc here steps back to the site list.
+            let username = match ask_username(&site, previous_username.as_deref()) {
+                Some(u) => u,
+                None => continue 'account,
             };
-            previous_kinds = kinds.clone();
+            previous_username = Some(username.clone());
 
-            let mut account = TaskAccount::default();
-            account.account.username = Some(username.clone());
-            account.account.cookie_profile = cookies.clone();
-            account.kinds = kinds;
-            let slot = accounts.entry(site.clone()).or_default();
-            slot.push(account);
+            let cookies = pick_cookie_for(&site);
+            'detail: loop {
+                // Esc leaves the detail loop for the username, which keeps its
+                // text. Continuing 'detail instead would re-ask this same
+                // question — indistinguishable from doing nothing.
+                let kinds = match ask_kinds(&site, &previous_kinds) {
+                    Some(k) => k,
+                    None => continue 'who,
+                };
+                previous_kinds = kinds.clone();
 
-            // Two positive actions rather than a yes/no: there is no "no"
-            // to express, and Enter takes the highlighted row, which is
-            // save.
-            let choice = menu::pick_single(
-                &format!("New task ─ {name}"),
-                vec![
-                    (
-                        format!("Save task '{name}'"),
-                        vec![format!("{} account(s) so far", total(&accounts))],
-                    ),
-                    (
-                        "Add another account".to_string(),
-                        vec!["Site, account and content again.".to_string()],
-                    ),
-                ],
-            );
-            match choice {
-                Step::Value(0) => return finish(&name, accounts, editing),
-                // Add another: leave the detail loop so the site is asked
-                // again. The remembered site puts the cursor back on it.
-                Step::Value(_) => break 'detail,
-                // Esc re-asks the content question with its selection
-                // still marked.
-                Step::Back => continue 'detail,
-                Step::Cancel => return finish(&name, accounts, editing),
+                let mut account = TaskAccount::default();
+                account.account.username = Some(username.clone());
+                account.account.cookie_profile = cookies.clone();
+                account.kinds = kinds;
+                let slot = accounts.entry(site.clone()).or_default();
+                slot.push(account);
+
+                // Two positive actions rather than a yes/no: there is no "no"
+                // to express, and Enter takes the highlighted row, which is
+                // save.
+                let choice = menu::pick_single(
+                    &format!("New task ─ {name}"),
+                    vec![
+                        (
+                            format!("Save task '{name}'"),
+                            vec![format!("{} account(s) so far", total(&accounts))],
+                        ),
+                        (
+                            "Add another account".to_string(),
+                            vec!["Site, account and content again.".to_string()],
+                        ),
+                    ],
+                );
+                match choice {
+                    Step::Value(0) => return finish(&name, accounts, editing),
+                    // Add another: leave this account entirely, not just the
+                    // detail loop, so the site is asked again. The remembered site
+                    // puts the cursor back on it.
+                    Step::Value(_) => break 'who,
+                    // Esc re-asks the content question with its selection
+                    // still marked.
+                    Step::Back => continue 'detail,
+                    Step::Cancel => return finish(&name, accounts, editing),
+                }
             }
         }
     }
