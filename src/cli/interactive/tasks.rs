@@ -294,7 +294,7 @@ fn ask_task_name() -> Option<String> {
         let raw = menu::input_text_back(
             "New task",
             "Task name (becomes the output folder):",
-            "historias_del_colegio",
+            "school_stories",
             "letters, digits, - and _",
             "",
         );

@@ -641,7 +641,7 @@ pub(super) fn preview_and_execute(requests: Vec<ScrapeJob>, cfg: &config::Config
         });
 
         if was_cancelled {
-            println!("⚠ Ejecución cancelada por el usuario");
+            println!("⚠ canceled");
         }
         for rep in &job_reports {
             for (stderr, line) in rep {
