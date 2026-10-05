@@ -161,10 +161,18 @@ fn task_menu(id: &str, task: &Task, cfg: &config::Config, notice: &mut Option<St
             *notice = notice_from(&outcome);
         }
         TaskAction::Delete => {
-            // Destructive: Enter keeps it, `y` deletes it.
-            let sure = menu::confirm_back("Tasks", &format!("delete task '{id}'?"), false, true)
-                .value()
-                .unwrap_or(false);
+            // Destructive: Enter keeps it, `y` deletes it. The key is named in
+            // the prompt because every *ordinary* question in the app answers
+            // yes on Enter, so pressing it here reads as "broken" rather than
+            // as "no" — the hint line alone was not enough.
+            let sure = menu::confirm_back(
+                "Tasks",
+                &format!("delete task '{id}'?  (y to confirm)"),
+                false,
+                true,
+            )
+            .value()
+            .unwrap_or(false);
             if sure && let Some(dir) = config::tasks_dir() {
                 let path = dir.join(format!("{id}.toml"));
                 match std::fs::remove_file(&path) {
