@@ -83,24 +83,41 @@ fn chrome_title(context: &str) -> String {
 /// border title, e.g. "Download content" → `╭ SCRAPMF v1.7.0 ─ Download content ─╮`.
 /// Returns the picked index, `Back` on Esc/q and `Cancel` on Ctrl+C.
 pub fn pick_single(context: &str, options: Vec<(String, Vec<String>)>) -> Step<usize> {
-    pick_single_inner(context, options, false)
+    pick_single_inner(context, options, false, None)
 }
 
 /// As [`pick_single`], but advertises that Esc steps back.
 pub fn pick_single_back(context: &str, options: Vec<(String, Vec<String>)>) -> Step<usize> {
-    pick_single_inner(context, options, true)
+    pick_single_inner(context, options, true, None)
+}
+
+/// As [`pick_single_back`], but with the cursor starting on `initial`.
+///
+/// A wizard that steps back re-opens the question on the answer it already
+/// has, instead of dropping the user at the top of the list. `initial` is
+/// clamped, so a stale index is harmless.
+pub fn pick_single_back_at(
+    context: &str,
+    options: Vec<(String, Vec<String>)>,
+    initial: usize,
+) -> Step<usize> {
+    pick_single_inner(context, options, true, Some(initial))
 }
 
 fn pick_single_inner(
     context: &str,
     options: Vec<(String, Vec<String>)>,
     back: bool,
+    cursor: Option<usize>,
 ) -> Step<usize> {
     if options.is_empty() {
         return Step::Cancel;
     }
     let title = chrome_title(context);
     let mut b = Browser::new(title).mode(Mode::Single);
+    if let Some(i) = cursor {
+        b = b.cursor_at(i);
+    }
     if back {
         b = b.hint(key_hint(true));
     }

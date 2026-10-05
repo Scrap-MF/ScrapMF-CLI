@@ -169,63 +169,86 @@ fn create_task(existing: Option<Task>) -> Created {
         },
     };
 
+    // Remembered across step-backs so a question re-opens on what the user
+    // already answered, which is what every other flow does.
+    let mut previous_site: Option<String> = None;
+    let mut previous_username: Option<String> = None;
+    let mut previous_kinds: Vec<String> = Vec::new();
+
     let site_opts = crate::cli::interactive::scrape_flow::site_options_with_fallbacks(&[]);
     if site_opts.is_empty() {
         crate::output::print_error("no sites configured — add one under Configuration first");
         return Created::Cancelled;
     }
 
-    loop {
-        let site = match ask_site(&name, &site_opts) {
+    // Labelled at three levels because each `Esc` has to land on the question
+    // immediately before it: a label is only in scope inside its own loop, so
+    // the direction of the jump is what carries the meaning.
+    // One loop level: it re-asks the site question, which is both where "step
+    // back" from the username lands and where "add another account" restarts.
+    'account: loop {
+        let site = match ask_site(&name, &site_opts, previous_site.as_deref()) {
             Some(s) => s,
-            // First question of the loop: Esc leaves the wizard.
+            // Nothing before the site question: cancel outright, or if
+            // accounts are already collected, save what there is.
             None => {
                 if accounts.is_empty() {
                     return Created::Cancelled;
                 }
-                // Mid-loop, Esc backs out to the last saved question.
                 return finish(&name, accounts, editing);
             }
         };
+        previous_site = Some(site.clone());
 
-        let username = match ask_username(&site) {
+        // Esc here steps back to the site list.
+        let username = match ask_username(&site, previous_username.as_deref()) {
             Some(u) => u,
-            None => continue,
+            None => continue 'account,
         };
+        previous_username = Some(username.clone());
+
         let cookies = pick_cookie_for(&site);
-        let kinds = match ask_kinds(&site) {
-            Some(k) => k,
-            None => continue,
-        };
+        'detail: loop {
+            // Esc here steps back to the username, which keeps its text.
+            let kinds = match ask_kinds(&site, &previous_kinds) {
+                Some(k) => k,
+                None => continue 'detail,
+            };
+            previous_kinds = kinds.clone();
 
-        let mut account = TaskAccount::default();
-        account.account.username = Some(username.clone());
-        account.account.cookie_profile = cookies;
-        account.kinds = kinds;
-        let slot = accounts.entry(site).or_default();
-        slot.push(account);
+            let mut account = TaskAccount::default();
+            account.account.username = Some(username.clone());
+            account.account.cookie_profile = cookies.clone();
+            account.kinds = kinds;
+            let slot = accounts.entry(site.clone()).or_default();
+            slot.push(account);
 
-        // Two positive actions rather than a yes/no: there is no "no" to
-        // express, and Enter takes the highlighted row — the first one saves.
-        let choice = menu::pick_single(
-            &format!("New task ─ {name}"),
-            vec![
-                (
-                    format!("Save task '{name}'"),
-                    vec![format!("{} account(s) so far", total(&accounts))],
-                ),
-                (
-                    "Add another account".to_string(),
-                    vec!["Site, account and content again.".to_string()],
-                ),
-            ],
-        );
-        match choice {
-            Step::Value(0) => return finish(&name, accounts, editing),
-            Step::Value(_) => {}
-            // Esc steps back to the content question.
-            Step::Back => continue,
-            Step::Cancel => return finish(&name, accounts, editing),
+            // Two positive actions rather than a yes/no: there is no "no"
+            // to express, and Enter takes the highlighted row, which is
+            // save.
+            let choice = menu::pick_single(
+                &format!("New task ─ {name}"),
+                vec![
+                    (
+                        format!("Save task '{name}'"),
+                        vec![format!("{} account(s) so far", total(&accounts))],
+                    ),
+                    (
+                        "Add another account".to_string(),
+                        vec!["Site, account and content again.".to_string()],
+                    ),
+                ],
+            );
+            match choice {
+                Step::Value(0) => return finish(&name, accounts, editing),
+                // Add another: leave the detail loop so the site is asked
+                // again. The remembered site puts the cursor back on it.
+                Step::Value(_) => break 'detail,
+                // Esc re-asks the content question with its selection
+                // still marked.
+                Step::Back => continue 'detail,
+                Step::Cancel => return finish(&name, accounts, editing),
+            }
         }
     }
 }
@@ -293,7 +316,7 @@ fn ask_task_name() -> Option<String> {
     }
 }
 
-fn ask_site(task: &str, site_opts: &[String]) -> Option<String> {
+fn ask_site(task: &str, site_opts: &[String], previous: Option<&str>) -> Option<String> {
     let site_list: Vec<(String, Vec<String>)> = site_opts
         .iter()
         .map(|s| {
@@ -308,21 +331,24 @@ fn ask_site(task: &str, site_opts: &[String]) -> Option<String> {
             (theme::brand_site_label(s), details)
         })
         .collect();
-    let picked = menu::pick_single_back(&format!("Task '{task}' ─ site"), site_list);
+    let initial = previous
+        .and_then(|p| site_opts.iter().position(|s| s == p))
+        .unwrap_or(0);
+    let picked = menu::pick_single_back_at(&format!("Task '{task}' ─ site"), site_list, initial);
     match picked {
         Step::Value(i) => site_opts.get(i).cloned(),
         Step::Back | Step::Cancel => None,
     }
 }
 
-fn ask_username(site: &str) -> Option<String> {
+fn ask_username(site: &str, previous: Option<&str>) -> Option<String> {
     loop {
         let raw = menu::input_text_back(
             &format!("Task ─ {site}"),
             "Username:",
             "someone",
             "no @ needed",
-            "",
+            previous.unwrap_or(""),
         );
         let value = match raw {
             Step::Value(v) => v,
@@ -390,7 +416,7 @@ fn rank_cookie_profiles(stored: Vec<String>, sites: &[String]) -> Vec<(bool, Str
 }
 
 /// Pick what this account wants, from its own site's menu.
-fn ask_kinds(site: &str) -> Option<Vec<String>> {
+fn ask_kinds(site: &str, previous: &[String]) -> Option<Vec<String>> {
     let options = crate::cli::interactive::content::content_options(site);
     if options.is_empty() {
         return Some(vec!["All".to_string()]);
@@ -399,19 +425,33 @@ fn ask_kinds(site: &str) -> Option<Vec<String>> {
         .iter()
         .map(|o| (o.to_string(), Vec::new()))
         .collect();
-    let idxs = match menu::pick_multi_back(&format!("Task ─ {site} ─ content"), entries, &[]) {
-        Step::Value(v) => v,
-        Step::Back | Step::Cancel => return None,
-    };
+    let prechecked = prechecked_indices(&options, previous);
+    let idxs =
+        match menu::pick_multi_back(&format!("Task ─ {site} ─ content"), entries, &prechecked) {
+            Step::Value(v) => v,
+            Step::Back | Step::Cancel => return None,
+        };
     let picked: Vec<String> = idxs
         .into_iter()
         .filter_map(|i| options.get(i).map(|o| o.to_string()))
         .collect();
     if picked.is_empty() {
         println!("⚠ pick at least one kind");
-        return ask_kinds(site);
+        return ask_kinds(site, previous);
     }
     Some(picked)
+}
+
+/// Indices of `previous` within `options`, for the picker to pre-mark.
+///
+/// A label the site no longer offers is skipped rather than treated as an
+/// error: the task was written when the site offered it, and the run reports
+/// the account as skipped instead of refusing to open the menu.
+fn prechecked_indices(options: &[&str], previous: &[String]) -> Vec<usize> {
+    previous
+        .iter()
+        .filter_map(|k| options.iter().position(|o| *o == k.as_str()))
+        .collect()
 }
 
 /// Run a saved task.
@@ -688,6 +728,41 @@ mod tests {
             !kinds_for_site("instagram", &requested).is_empty(),
             "a task written before kinds were per-account still runs"
         );
+    }
+
+    #[test]
+    fn precheck_marks_the_kinds_already_chosen() {
+        // Esc at the content question has to re-open it marked, or the user
+        // loses the selection just by stepping back one question.
+        let options = ["All", "Posts", "Reels", "Highlights", "Stories", "Profile"];
+        // Order follows the stored selection, not the menu: `prechecked` is a
+        // set of rows to mark, so the order carries no meaning either way.
+        assert_eq!(
+            prechecked_indices(&options, &["Stories".into(), "Highlights".into()]),
+            vec![4, 3]
+        );
+        assert_eq!(prechecked_indices(&options, &["Posts".into()]), vec![1]);
+    }
+
+    #[test]
+    fn precheck_skips_a_kind_the_site_no_longer_offers() {
+        // Written when the site offered it, or kept across a registry change:
+        // the menu still opens, and the run reports the account as skipped.
+        let options = ["All", "Posts", "Reels"];
+        let stale: Vec<usize> = prechecked_indices(&options, &["Stories".into()]);
+        assert!(stale.is_empty());
+        let both = prechecked_indices(&options, &["Reels".into(), "Gone".into()]);
+        assert_eq!(
+            both,
+            vec![2],
+            "the stale kind is dropped, the live one is not"
+        );
+    }
+
+    #[test]
+    fn precheck_of_nothing_marks_nothing() {
+        let options = ["All", "Posts"];
+        assert!(prechecked_indices(&options, &[]).is_empty());
     }
 
     #[test]
