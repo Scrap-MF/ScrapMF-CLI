@@ -20,6 +20,19 @@ use crate::cli::interactive::menu::{self, Step};
 use crate::cli::interactive::theme;
 use crate::config::{self, Task, TaskAccount};
 
+/// A prompt's answer, keeping the two ways out apart.
+///
+/// `Option<T>` cannot carry both, and conflating them is what made Ctrl+C a
+/// dead key here: every helper returned `None` for "stepped back" *and* for
+/// "abandoned", so leaving without saving was the same gesture as going back.
+enum Answer<T> {
+    Value(T),
+    /// Esc — return to the previous question.
+    Back,
+    /// Ctrl+C — leave the wizard without writing.
+    Abort,
+}
+
 /// What a finished wizard did.
 enum Created {
     Saved(String),
@@ -184,38 +197,69 @@ fn create_task(existing: Option<Task>) -> Created {
             (id, t.accounts)
         }
         None => match ask_task_name() {
-            Some(n) => (n, std::collections::HashMap::new()),
-            None => return Created::Cancelled,
+            Answer::Value(n) => (n, std::collections::HashMap::new()),
+            Answer::Back | Answer::Abort => return Created::Cancelled,
         },
     };
 
-    // Remembered across step-backs so a question re-opens on what the user
-    // already answered, which is what every other flow does.
-    let mut previous_site: Option<String> = None;
-    let mut previous_username: Option<String> = None;
-    let mut previous_kinds: Vec<String> = Vec::new();
-
-    let site_opts = crate::cli::interactive::scrape_flow::site_options_with_fallbacks(&[]);
+    let Some(site_opts) =
+        Some(crate::cli::interactive::scrape_flow::site_options_with_fallbacks(&[]))
+    else {
+        crate::output::print_error("no sites configured — add one under Configuration first");
+        return Created::Cancelled;
+    };
     if site_opts.is_empty() {
         crate::output::print_error("no sites configured — add one under Configuration first");
         return Created::Cancelled;
     }
 
-    // Labelled at three levels because each `Esc` has to land on the question
-    // immediately before it: a label is only in scope inside its own loop, so
-    // the direction of the jump is what carries the meaning.
-    // One loop level: it re-asks the site question, which is both where "step
-    // back" from the username lands and where "add another account" restarts.
-    'account: loop {
-        let site = match ask_site(&name, &site_opts, previous_site.as_deref()) {
-            Some(s) => s,
-            // Nothing before the site question: cancel outright, or if
-            // accounts are already collected, save what there is.
-            None => {
-                if accounts.is_empty() {
-                    return Created::Cancelled;
+    // The most recently committed account, and where it sits in its site's
+    // list. Esc at the site question re-opens it instead of leaving: a step
+    // back must not save, and must not drop work either.
+    let mut last_added: Option<(String, TaskAccount, usize)> = None;
+    // True on the pass that re-opens `last_added`: the account is already in
+    // `accounts`, so committing must replace it rather than append.
+    let mut reopening = false;
+    // Answers from the pass in flight, so a step back re-opens the question on
+    // what the user already gave.
+    let mut previous_site: Option<String> = None;
+    let mut previous_username: Option<String> = None;
+    let mut previous_kinds: Vec<String> = Vec::new();
+
+    'wizard: loop {
+        // Re-opening skips the site question entirely: the network and the
+        // account are already known.
+        // `is_reopen` has to outlive the branch: the account is committed at
+        // the picker, several questions later. Clearing `reopening` here made
+        // the picker think it was adding a new account and would have stacked
+        // a second copy of the one being edited.
+        let mut is_reopen = false;
+        let site = if reopening {
+            reopening = false;
+            match &last_added {
+                Some((s, _, _)) => {
+                    is_reopen = true;
+                    s.clone()
                 }
-                return finish(&name, accounts, editing);
+                None => return Created::Cancelled,
+            }
+        } else {
+            match ask_site(&name, &site_opts, previous_site.as_deref()) {
+                Answer::Value(s) => s,
+                // Ctrl+C leaves without writing, always.
+                Answer::Abort => return Created::Cancelled,
+                Answer::Back => {
+                    // Nothing collected yet, so there is nothing to go back
+                    // to. Re-open the last account instead: the pass that
+                    // follows takes the site from `last_added` itself.
+                    let Some((_, a, _)) = last_added.clone() else {
+                        return Created::Cancelled;
+                    };
+                    previous_username = a.account.username.clone();
+                    previous_kinds = a.kinds.clone();
+                    reopening = true;
+                    continue 'wizard;
+                }
             }
         };
         // A remembered username belongs to the network it was typed for.
@@ -227,33 +271,35 @@ fn create_task(existing: Option<Task>) -> Created {
         }
         previous_site = Some(site.clone());
 
-        // Its own level so the content question can escape back to it: the
-        // username is a question *before* the detail loop, not inside it.
         'who: loop {
-            // Esc here steps back to the site list.
             let username = match ask_username(&site, previous_username.as_deref()) {
-                Some(u) => u,
-                None => continue 'account,
+                Answer::Value(u) => u,
+                Answer::Abort => return Created::Cancelled,
+                Answer::Back => continue 'wizard,
             };
             previous_username = Some(username.clone());
 
             let cookies = pick_cookie_for(&site);
+            let cookies = match cookies {
+                Answer::Value(c) => c,
+                Answer::Abort => return Created::Cancelled,
+                Answer::Back => continue 'who,
+            };
+
             'detail: loop {
-                // Esc leaves the detail loop for the username, which keeps its
-                // text. Continuing 'detail instead would re-ask this same
-                // question — indistinguishable from doing nothing.
                 let kinds = match ask_kinds(&site, &previous_kinds) {
-                    Some(k) => k,
-                    None => continue 'who,
+                    Answer::Value(k) => k,
+                    Answer::Abort => return Created::Cancelled,
+                    Answer::Back => continue 'who,
                 };
                 previous_kinds = kinds.clone();
 
+                // Held back until the picker decides: committing here is what
+                // made Esc at the picker duplicate the account.
                 let mut account = TaskAccount::default();
                 account.account.username = Some(username.clone());
                 account.account.cookie_profile = cookies.clone();
                 account.kinds = kinds;
-                let slot = accounts.entry(site.clone()).or_default();
-                slot.push(account);
 
                 // Two positive actions rather than a yes/no: there is no "no"
                 // to express, and Enter takes the highlighted row, which is
@@ -263,7 +309,7 @@ fn create_task(existing: Option<Task>) -> Created {
                     vec![
                         (
                             format!("Save task '{name}'"),
-                            vec![format!("{} account(s) so far", total(&accounts))],
+                            vec![format!("{} account(s) total", total(&accounts) + 1)],
                         ),
                         (
                             "Add another account".to_string(),
@@ -272,25 +318,46 @@ fn create_task(existing: Option<Task>) -> Created {
                     ],
                 );
                 match choice {
-                    Step::Value(0) => return finish(&name, accounts, editing),
-                    // Add another: leave this account entirely, not just the
-                    // detail loop, so the site is asked again. The remembered
-                    // site puts the cursor back on it, but the account and its
-                    // content are cleared — this is a different person, not a
-                    // correction.
+                    Step::Value(0) => {
+                        commit_pending(&mut accounts, &site, &account, is_reopen);
+                        return finish(&name, accounts, editing);
+                    }
                     Step::Value(_) => {
+                        let idx = commit_pending(&mut accounts, &site, &account, is_reopen);
+                        last_added = Some((site.clone(), account, idx));
                         previous_username = None;
                         previous_kinds.clear();
                         break 'who;
                     }
                     // Esc re-asks the content question with its selection
-                    // still marked.
+                    // still marked, and drops the un-committed account.
                     Step::Back => continue 'detail,
-                    Step::Cancel => return finish(&name, accounts, editing),
+                    Step::Cancel => return Created::Cancelled,
                 }
             }
         }
     }
+}
+
+/// Add the pending account, or replace the one being re-opened.
+///
+/// Returns where it landed in that site's list. Replacing by index rather than
+/// popping keeps the account where the user put it, and matters because two
+/// accounts of the same site can exist: popping would have edited the wrong
+/// one.
+fn commit_pending(
+    accounts: &mut std::collections::HashMap<String, Vec<TaskAccount>>,
+    site: &str,
+    account: &TaskAccount,
+    replace: bool,
+) -> usize {
+    let slot = accounts.entry(site.to_string()).or_default();
+    if replace && let Some(idx) = slot.len().checked_sub(1) {
+        slot[idx] = account.clone();
+        return idx;
+    }
+    slot.push(account.clone());
+    slot.len() - 1
 }
 
 fn total(accounts: &std::collections::HashMap<String, Vec<TaskAccount>>) -> usize {
@@ -356,7 +423,7 @@ fn report(outcome: &Created) {
     }
 }
 
-fn ask_task_name() -> Option<String> {
+fn ask_task_name() -> Answer<String> {
     loop {
         let raw = menu::input_text_back(
             "New task",
@@ -367,7 +434,8 @@ fn ask_task_name() -> Option<String> {
         );
         let name = match raw {
             Step::Value(v) => v,
-            Step::Back | Step::Cancel => return None,
+            Step::Back => return Answer::Back,
+            Step::Cancel => return Answer::Abort,
         };
         let name = name.trim().to_string();
         if name.is_empty() {
@@ -379,11 +447,11 @@ fn ask_task_name() -> Option<String> {
             println!("⚠ no / . or \\ in a task name — it becomes a folder");
             continue;
         }
-        return Some(name);
+        return Answer::Value(name);
     }
 }
 
-fn ask_site(task: &str, site_opts: &[String], previous: Option<&str>) -> Option<String> {
+fn ask_site(task: &str, site_opts: &[String], previous: Option<&str>) -> Answer<String> {
     let site_list: Vec<(String, Vec<String>)> = site_opts
         .iter()
         .map(|s| {
@@ -403,12 +471,16 @@ fn ask_site(task: &str, site_opts: &[String], previous: Option<&str>) -> Option<
         .unwrap_or(0);
     let picked = menu::pick_single_back_at(&format!("Task '{task}' ─ site"), site_list, initial);
     match picked {
-        Step::Value(i) => site_opts.get(i).cloned(),
-        Step::Back | Step::Cancel => None,
+        Step::Value(i) => match site_opts.get(i) {
+            Some(s) => Answer::Value(s.clone()),
+            None => Answer::Back,
+        },
+        Step::Back => Answer::Back,
+        Step::Cancel => Answer::Abort,
     }
 }
 
-fn ask_username(site: &str, previous: Option<&str>) -> Option<String> {
+fn ask_username(site: &str, previous: Option<&str>) -> Answer<String> {
     loop {
         let raw = menu::input_text_back(
             &format!("Task ─ {site}"),
@@ -419,14 +491,15 @@ fn ask_username(site: &str, previous: Option<&str>) -> Option<String> {
         );
         let value = match raw {
             Step::Value(v) => v,
-            Step::Back | Step::Cancel => return None,
+            Step::Back => return Answer::Back,
+            Step::Cancel => return Answer::Abort,
         };
         let value = value.trim().trim_start_matches('@').trim().to_string();
         if value.is_empty() {
             println!("⚠ enter a username");
             continue;
         }
-        return Some(value);
+        return Answer::Value(value);
     }
 }
 
@@ -435,11 +508,12 @@ fn ask_username(site: &str, previous: Option<&str>) -> Option<String> {
 /// Only stored profiles are offered, and the ones that actually carry cookies
 /// for this site come first — offering a session that cannot authenticate the
 /// account is worse than offering none.
-fn pick_cookie_for(site: &str) -> Option<String> {
+fn pick_cookie_for(site: &str) -> Answer<Option<String>> {
     use crate::config::cookies;
     let stored = cookies::list_profiles();
     if stored.is_empty() {
-        return None;
+        // Nothing to choose: the account just keeps the site default.
+        return Answer::Value(None);
     }
     let sites = vec![site.to_string()];
     let ranked = rank_cookie_profiles(stored, &sites);
@@ -462,9 +536,10 @@ fn pick_cookie_for(site: &str) -> Option<String> {
     }
     match menu::pick_single_back(&format!("Cookies for {site}"), entries) {
         // Index 0 is the site default, an explicit answer rather than a skip.
-        Step::Value(0) | Step::Back => None,
-        Step::Value(i) => ranked.get(i - 1).map(|(_, name)| name.clone()),
-        Step::Cancel => None,
+        Step::Value(0) => Answer::Value(None),
+        Step::Value(i) => Answer::Value(ranked.get(i - 1).map(|(_, name)| name.clone())),
+        Step::Back => Answer::Back,
+        Step::Cancel => Answer::Abort,
     }
 }
 
@@ -483,10 +558,10 @@ fn rank_cookie_profiles(stored: Vec<String>, sites: &[String]) -> Vec<(bool, Str
 }
 
 /// Pick what this account wants, from its own site's menu.
-fn ask_kinds(site: &str, previous: &[String]) -> Option<Vec<String>> {
+fn ask_kinds(site: &str, previous: &[String]) -> Answer<Vec<String>> {
     let options = crate::cli::interactive::content::content_options(site);
     if options.is_empty() {
-        return Some(vec!["All".to_string()]);
+        return Answer::Value(vec!["All".to_string()]);
     }
     let entries: Vec<(String, Vec<String>)> = options
         .iter()
@@ -496,7 +571,8 @@ fn ask_kinds(site: &str, previous: &[String]) -> Option<Vec<String>> {
     let idxs =
         match menu::pick_multi_back(&format!("Task ─ {site} ─ content"), entries, &prechecked) {
             Step::Value(v) => v,
-            Step::Back | Step::Cancel => return None,
+            Step::Back => return Answer::Back,
+            Step::Cancel => return Answer::Abort,
         };
     let picked: Vec<String> = idxs
         .into_iter()
@@ -506,7 +582,7 @@ fn ask_kinds(site: &str, previous: &[String]) -> Option<Vec<String>> {
         println!("⚠ pick at least one kind");
         return ask_kinds(site, previous);
     }
-    Some(picked)
+    Answer::Value(picked)
 }
 
 /// Indices of `previous` within `options`, for the picker to pre-mark.
@@ -795,6 +871,124 @@ mod tests {
             !kinds_for_site("instagram", &requested).is_empty(),
             "a task written before kinds were per-account still runs"
         );
+    }
+
+    fn account(username: &str, kinds: &[&str]) -> TaskAccount {
+        let mut a = TaskAccount::default();
+        a.account.username = Some(username.to_string());
+        a.kinds = kinds.iter().map(|k| k.to_string()).collect();
+        a
+    }
+
+    #[test]
+    fn commit_appends_when_the_account_is_new() {
+        let mut accounts = std::collections::HashMap::new();
+        assert_eq!(
+            commit_pending(
+                &mut accounts,
+                "instagram",
+                &account("one", &["Stories"]),
+                false
+            ),
+            0
+        );
+        assert_eq!(
+            commit_pending(
+                &mut accounts,
+                "instagram",
+                &account("two", &["Reels"]),
+                false
+            ),
+            1
+        );
+        let list = &accounts["instagram"];
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].account.username.as_deref(), Some("one"));
+    }
+
+    #[test]
+    fn commit_replaces_in_place_when_reopening() {
+        // Re-opening the last account must edit it, not stack a copy: this is
+        // what made Esc at the picker duplicate an entry.
+        let mut accounts = std::collections::HashMap::new();
+        commit_pending(
+            &mut accounts,
+            "instagram",
+            &account("one", &["Stories"]),
+            false,
+        );
+        let idx = commit_pending(
+            &mut accounts,
+            "instagram",
+            &account("one", &["Reels"]),
+            true,
+        );
+
+        let list = &accounts["instagram"];
+        assert_eq!(list.len(), 1, "replaced, not appended");
+        assert_eq!(idx, 0);
+        assert_eq!(list[0].kinds, vec!["Reels"], "the new content stuck");
+    }
+
+    #[test]
+    fn replacing_edits_the_last_of_several_accounts_on_the_same_site() {
+        // Two accounts on one network: popping the last element would have
+        // edited the wrong one.
+        let mut accounts = std::collections::HashMap::new();
+        commit_pending(
+            &mut accounts,
+            "instagram",
+            &account("one", &["Stories"]),
+            false,
+        );
+        commit_pending(
+            &mut accounts,
+            "instagram",
+            &account("two", &["Posts"]),
+            false,
+        );
+        commit_pending(
+            &mut accounts,
+            "instagram",
+            &account("two", &["Highlights"]),
+            true,
+        );
+
+        let list = &accounts["instagram"];
+        assert_eq!(list.len(), 2, "still two accounts");
+        assert_eq!(list[0].kinds, vec!["Stories"], "the first is untouched");
+        assert_eq!(list[1].kinds, vec!["Highlights"]);
+    }
+
+    #[test]
+    fn replacing_on_an_empty_site_appends_instead() {
+        // `replace` is only ever true for an account already in the list, but a
+        // defensive branch beats an underflow panic.
+        let mut accounts = std::collections::HashMap::new();
+        let idx = commit_pending(
+            &mut accounts,
+            "instagram",
+            &account("one", &["Stories"]),
+            true,
+        );
+        assert_eq!(idx, 0);
+        assert_eq!(accounts["instagram"].len(), 1);
+    }
+
+    #[test]
+    fn back_and_abort_stay_distinct_answers() {
+        // Collapsing these is what made Ctrl+C a dead key: it used to return
+        // the same `None` as Esc, so leaving without saving was impossible.
+        fn shape(a: Answer<String>) -> &'static str {
+            match a {
+                Answer::Value(_) => "value",
+                Answer::Back => "back",
+                Answer::Abort => "abort",
+            }
+        }
+        assert_eq!(shape(Answer::Value("x".into())), "value");
+        assert_eq!(shape(Answer::Back), "back");
+        assert_eq!(shape(Answer::Abort), "abort");
     }
 
     #[test]
