@@ -220,6 +220,8 @@ fn create_task(existing: Option<Task>) -> Created {
     // True on the pass that re-opens `last_added`: the account is already in
     // `accounts`, so committing must replace it rather than append.
     let mut reopening = false;
+    // The committed account a re-open shows directly, skipping every question.
+    let mut reopen_account: Option<TaskAccount> = None;
     // Answers from the pass in flight, so a step back re-opens the question on
     // what the user already gave.
     let mut previous_site: Option<String> = None;
@@ -255,8 +257,12 @@ fn create_task(existing: Option<Task>) -> Created {
                     let Some((_, a, _)) = last_added.clone() else {
                         return Created::Cancelled;
                     };
+                    // Restored so the commit question can be shown as it was:
+                    // stepping back one question lands on the picker, not on
+                    // the username we just came forward from.
                     previous_username = a.account.username.clone();
                     previous_kinds = a.kinds.clone();
+                    reopen_account = Some(a);
                     reopening = true;
                     continue 'wizard;
                 }
@@ -272,34 +278,55 @@ fn create_task(existing: Option<Task>) -> Created {
         previous_site = Some(site.clone());
 
         'who: loop {
-            let username = match ask_username(&site, previous_username.as_deref()) {
-                Answer::Value(u) => u,
-                Answer::Abort => return Created::Cancelled,
-                Answer::Back => continue 'wizard,
-            };
-            previous_username = Some(username.clone());
-
-            let cookies = pick_cookie_for(&site);
-            let cookies = match cookies {
-                Answer::Value(c) => c,
-                Answer::Abort => return Created::Cancelled,
-                Answer::Back => continue 'who,
-            };
-
-            'detail: loop {
-                let kinds = match ask_kinds(&site, &previous_kinds) {
-                    Answer::Value(k) => k,
+            // On a re-open all four answers are already known, so only the
+            // commit question is worth showing.
+            let (username, cookies) = if is_reopen {
+                (
+                    previous_username.clone().unwrap_or_default(),
+                    reopen_account
+                        .as_ref()
+                        .and_then(|a| a.account.cookie_profile.clone()),
+                )
+            } else {
+                let username = match ask_username(&site, previous_username.as_deref()) {
+                    Answer::Value(u) => u,
+                    Answer::Abort => return Created::Cancelled,
+                    Answer::Back => continue 'wizard,
+                };
+                previous_username = Some(username.clone());
+                let cookies = match pick_cookie_for(&site) {
+                    Answer::Value(c) => c,
                     Answer::Abort => return Created::Cancelled,
                     Answer::Back => continue 'who,
                 };
-                previous_kinds = kinds.clone();
+                (username, cookies)
+            };
 
-                // Held back until the picker decides: committing here is what
-                // made Esc at the picker duplicate the account.
-                let mut account = TaskAccount::default();
-                account.account.username = Some(username.clone());
-                account.account.cookie_profile = cookies.clone();
-                account.kinds = kinds;
+            'detail: loop {
+                // Captured before the flag is cleared. Clearing it *here* rather
+                // than on entry is what makes Esc from the picker land on the
+                // content question instead of on the picker again.
+                let replace = is_reopen;
+                is_reopen = false;
+
+                let account = if replace {
+                    reopen_account.clone().unwrap_or_default()
+                } else {
+                    let kinds = match ask_kinds(&site, &previous_kinds) {
+                        Answer::Value(k) => k,
+                        Answer::Abort => return Created::Cancelled,
+                        Answer::Back => continue 'who,
+                    };
+                    previous_kinds = kinds.clone();
+
+                    // Held back until the picker decides: committing here is
+                    // what made Esc at the picker duplicate the account.
+                    let mut a = TaskAccount::default();
+                    a.account.username = Some(username.clone());
+                    a.account.cookie_profile = cookies.clone();
+                    a.kinds = kinds;
+                    a
+                };
 
                 // Two positive actions rather than a yes/no: there is no "no"
                 // to express, and Enter takes the highlighted row, which is
@@ -319,11 +346,11 @@ fn create_task(existing: Option<Task>) -> Created {
                 );
                 match choice {
                     Step::Value(0) => {
-                        commit_pending(&mut accounts, &site, &account, is_reopen);
+                        commit_pending(&mut accounts, &site, &account, replace);
                         return finish(&name, accounts, editing);
                     }
                     Step::Value(_) => {
-                        let idx = commit_pending(&mut accounts, &site, &account, is_reopen);
+                        let idx = commit_pending(&mut accounts, &site, &account, replace);
                         last_added = Some((site.clone(), account, idx));
                         previous_username = None;
                         previous_kinds.clear();
