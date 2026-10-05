@@ -5,7 +5,7 @@ use anyhow::Context;
 
 use super::fs::write_config_file;
 use super::migrations::{migrate_highlights_if_needed, migrate_tiktok_robustness};
-use super::{Profile, RateLimit, Site, sites_dir};
+use super::{Profile, RateLimit, Site, Task, sites_dir};
 
 pub(crate) fn tiktok_posts_conditional_directory() -> toml::Value {
     let seg = |s: &str| toml::Value::String(s.to_string());
@@ -875,6 +875,17 @@ pub fn ensure_facebook_site() -> anyhow::Result<()> {
     write_config_file(&target, &content)
 }
 
+/// Serialize a task to `path` with doc header and 0o600 perms.
+pub fn write_task_file(path: &Path, task: &Task) -> anyhow::Result<()> {
+    let body = toml::to_string_pretty(task).context("serialize task")?;
+    let header = format!(
+        "# scrapmf task — {}\n# Saved content batch: fixed kinds, fixed accounts.\n\n",
+        task.task.as_deref().unwrap_or("task")
+    );
+    let content = format!("{header}{body}\n");
+    write_config_file(path, &content)
+}
+
 /// Serialize a profile to `path` with doc header and 0o600 perms.
 pub fn write_profile_file(path: &Path, profile: &Profile) -> anyhow::Result<()> {
     let body = toml::to_string_pretty(profile).context("serialize profile")?;
@@ -884,4 +895,98 @@ pub fn write_profile_file(path: &Path, profile: &Profile) -> anyhow::Result<()> 
     );
     let content = format!("{header}{body}\n");
     write_config_file(path, &content)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod task_file_tests {
+    use super::*;
+    use crate::config::Account;
+    use std::path::PathBuf;
+
+    fn tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("scrapmf-task-file-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn sample() -> Task {
+        let accounts = vec![
+            Account {
+                username: Some("one".into()),
+                cookie_profile: Some("friend_session".into()),
+                ..Default::default()
+            },
+            Account {
+                username: Some("two".into()),
+                ..Default::default()
+            },
+        ];
+        let mut map = std::collections::HashMap::new();
+        map.insert("instagram".to_string(), accounts);
+        Task {
+            task: Some("colegio".into()),
+            display_name: Some("historias del colegio".into()),
+            kinds: vec!["Stories".into(), "Highlights".into()],
+            accounts: map,
+        }
+    }
+
+    #[test]
+    fn task_round_trips_through_toml() {
+        let dir = tmp("roundtrip");
+        let path = dir.join("colegio.toml");
+        write_task_file(&path, &sample()).unwrap();
+        let back: Task = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        assert_eq!(back.task.as_deref(), Some("colegio"));
+        assert_eq!(back.display_name.as_deref(), Some("historias del colegio"));
+        // Kinds stay as the labels the site registry speaks, so a site that
+        // does not offer one can be filtered without a serde migration.
+        assert_eq!(back.kinds, vec!["Stories", "Highlights"]);
+        let accs = &back.accounts["instagram"];
+        assert_eq!(accs.len(), 2);
+        assert_eq!(accs[0].username.as_deref(), Some("one"));
+        assert_eq!(accs[0].cookie_profile.as_deref(), Some("friend_session"));
+        assert_eq!(accs[1].username.as_deref(), Some("two"));
+        assert!(accs[1].cookie_profile.is_none());
+    }
+
+    #[test]
+    fn a_task_without_cookies_omits_the_field() {
+        // Keeps the file honest: a reader should not have to wonder whether an
+        // absent cookie profile means "default" or "not set up yet".
+        let dir = tmp("sparse");
+        let path = dir.join("bare.toml");
+        let task = Task {
+            task: Some("bare".into()),
+            display_name: None,
+            kinds: vec!["Posts".into()],
+            accounts: std::collections::HashMap::new(),
+        };
+        write_task_file(&path, &task).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(!body.contains("cookie_profile"), "{body}");
+        assert!(!body.contains("display_name"), "{body}");
+    }
+
+    #[test]
+    fn a_task_may_span_several_sites() {
+        let dir = tmp("multi");
+        let path = dir.join("multi.toml");
+        let mut task = sample();
+        task.accounts.insert(
+            "tiktok".to_string(),
+            vec![Account {
+                username: Some("three".into()),
+                ..Default::default()
+            }],
+        );
+        write_task_file(&path, &task).unwrap();
+        let back: Task = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back.accounts.len(), 2);
+        assert!(back.accounts.contains_key("instagram"));
+        assert!(back.accounts.contains_key("tiktok"));
+    }
 }

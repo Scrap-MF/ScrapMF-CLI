@@ -146,6 +146,32 @@ pub struct Account {
     pub extra_args: Vec<String>,
 }
 
+/// A saved batch: a name, the content it wants, and the accounts to run it on.
+///
+/// Separate from [`Profile`] on purpose — a task answers "what and for whom",
+/// a profile answers "how", with per-run content choices and site overrides. A
+/// task stores no output or template configuration: `{scrapmf_root}` takes the
+/// task's name, so its media lands in its own tree without asking.
+///
+/// `kinds` holds the labels from the site registry rather than an enum: the
+/// selectable kinds live in the interactive layer, and the label round-trip is
+/// what the menus already speak.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Task {
+    /// Task id, taken from the filename stem.
+    pub task: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Content to fetch. `"All"` expands per site when the task runs, so a task
+    /// spanning networks follows what each one actually supports.
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    /// Site key -> the accounts on it. Same shape as a profile, which is what
+    /// lets both share account and cookie semantics.
+    #[serde(default)]
+    pub accounts: std::collections::HashMap<String, Vec<Account>>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Profile {
     pub profile: Option<String>,
