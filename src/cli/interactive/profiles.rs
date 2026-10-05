@@ -276,11 +276,11 @@ pub(super) fn prompt_scrape_as_profile() {
                 let kinds_desc = kinds_description(site_name, kinds);
                 let site_cfg = cfg.sites.get(site_name.as_str()).cloned();
                 // Resolve fields: account > site > profile > general
-                let mut cookies_from_browser: Option<String> = account
+                let cookies_from_browser: Option<String> = account
                     .cookies_from_browser
                     .clone()
                     .or_else(|| profile.cookies_from_browser.clone());
-                let mut cookies_file: Option<PathBuf> =
+                let cookies_file: Option<PathBuf> =
                     account.cookies.clone().or_else(|| profile.cookies.clone());
                 let mut archive: Option<PathBuf> = None;
                 let mut rate_limit: Option<crate::config::RateLimit> = None;
@@ -292,12 +292,6 @@ pub(super) fn prompt_scrape_as_profile() {
                     .or_else(|| profile.output_dir.clone());
 
                 if let Some(ref site) = site_cfg {
-                    if cookies_from_browser.is_none() {
-                        cookies_from_browser = site.cookies_from_browser.clone();
-                    }
-                    if cookies_file.is_none() {
-                        cookies_file = site.cookies.clone();
-                    }
                     if archive.is_none() {
                         archive = site.archive.clone();
                     }
@@ -312,22 +306,17 @@ pub(super) fn prompt_scrape_as_profile() {
                 // Cookie profiles (named Netscape files) outrank browser cookies:
                 // a friend's stored session must not be silently replaced by ours.
                 // Precedence: account > profile > site.
-                if let Some(name) = account
+                let named = account
                     .cookie_profile
                     .as_deref()
                     .or(profile.cookie_profile.as_deref())
-                    .or(site_cfg.as_ref().and_then(|s| s.cookie_profile.as_deref()))
-                {
-                    match crate::config::cookies::profile_path(name) {
-                        Some(p) if p.exists() => {
-                            cookies_file = Some(p);
-                            cookies_from_browser = None;
-                        }
-                        _ => println!(
-                            "⚠ cookie profile '{name}' not found — falling back to browser/session defaults"
-                        ),
-                    }
-                }
+                    .or(site_cfg.as_ref().and_then(|s| s.cookie_profile.as_deref()));
+                let (cookies_file, cookies_from_browser) = crate::config::cookies::resolve_session(
+                    named,
+                    cookies_file,
+                    cookies_from_browser,
+                    None,
+                );
                 // overrides per site from profile
                 let mut filename_template: Option<String> =
                     site_cfg.as_ref().and_then(|s| s.filename_template.clone());
