@@ -33,6 +33,30 @@ enum Answer<T> {
     Abort,
 }
 
+/// What Esc at the site question should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SiteBack {
+    /// Leave the wizard without writing.
+    Leave,
+    /// Re-open the last committed account.
+    Reopen,
+}
+
+/// Whether Esc at the site question re-opens the previous account or leaves.
+///
+/// Extracted because the looping case is a flag transition nobody can see in
+/// the control flow: inside a re-open, "step back" used to re-open the very
+/// same account, and the user could never get out of the wizard with Esc.
+fn site_back_escapes(in_reopen_pass: bool, has_last_added: bool) -> SiteBack {
+    // Nothing committed yet, or already inside a re-open where re-opening
+    // again would land on the screen we started from.
+    if !has_last_added || in_reopen_pass {
+        SiteBack::Leave
+    } else {
+        SiteBack::Reopen
+    }
+}
+
 /// What a finished wizard did.
 enum Created {
     Saved(String),
@@ -228,6 +252,10 @@ fn create_task(existing: Option<Task>) -> Created {
     // True on the pass that re-opens `last_added`: the account is already in
     // `accounts`, so committing must replace it rather than append.
     let mut reopening = false;
+    // True for the whole of a re-open pass, not just its entry. Without it Esc
+    // at the site question re-opened the same account forever, so stepping
+    // back never reached the exit.
+    let mut escapes_to_picker = false;
     // The committed account a re-open shows directly, skipping every question.
     let mut reopen_account: Option<TaskAccount> = None;
     // Answers from the pass in flight, so a step back re-opens the question on
@@ -259,8 +287,13 @@ fn create_task(existing: Option<Task>) -> Created {
                 // Ctrl+C leaves without writing, always.
                 Answer::Abort => return Created::Cancelled,
                 Answer::Back => {
-                    // Nothing collected yet, so there is nothing to go back
-                    // to. Re-open the last account instead: the pass that
+                    // Inside a re-open, going back again would land on the
+                    // picker we came from. Leaving is the only way forward.
+                    if site_back_escapes(escapes_to_picker, last_added.is_some()) == SiteBack::Leave
+                    {
+                        return Created::Cancelled;
+                    }
+                    // Otherwise re-open the last account: the pass that
                     // follows takes the site from `last_added` itself.
                     let Some((_, a, _)) = last_added.clone() else {
                         return Created::Cancelled;
@@ -272,6 +305,7 @@ fn create_task(existing: Option<Task>) -> Created {
                     previous_kinds = a.kinds.clone();
                     reopen_account = Some(a);
                     reopening = true;
+                    escapes_to_picker = true;
                     continue 'wizard;
                 }
             }
@@ -362,6 +396,8 @@ fn create_task(existing: Option<Task>) -> Created {
                         last_added = Some((site.clone(), account, idx));
                         previous_username = None;
                         previous_kinds.clear();
+                        // A normal pass: Esc at the site re-opens again.
+                        escapes_to_picker = false;
                         break 'who;
                     }
                     // Esc re-asks the content question with its selection
@@ -913,6 +949,31 @@ mod tests {
         a.account.username = Some(username.to_string());
         a.kinds = kinds.iter().map(|k| k.to_string()).collect();
         a
+    }
+
+    #[test]
+    fn esc_at_the_site_re_opens_until_it_would_loop() {
+        use super::{SiteBack, site_back_escapes};
+        // Nothing committed yet: there is no previous account to go back to.
+        assert_eq!(site_back_escapes(false, false), SiteBack::Leave);
+        // A normal pass with an account to return to: re-open it.
+        assert_eq!(site_back_escapes(false, true), SiteBack::Reopen);
+        // Already inside a re-open: re-opening lands on the picker we came
+        // from, so Esc has to leave or the user is trapped in the wizard.
+        assert_eq!(site_back_escapes(true, true), SiteBack::Leave);
+        assert_eq!(site_back_escapes(true, false), SiteBack::Leave);
+    }
+
+    #[test]
+    fn the_reopen_escape_is_not_the_same_as_an_unreopened_pass() {
+        use super::site_back_escapes;
+        // The whole bug in one assertion: same state, opposite outcome,
+        // because the pass is a re-open rather than a fresh account.
+        assert_ne!(
+            site_back_escapes(false, true),
+            site_back_escapes(true, true),
+            "only the pass kind distinguishes leaving from looping"
+        );
     }
 
     #[test]
