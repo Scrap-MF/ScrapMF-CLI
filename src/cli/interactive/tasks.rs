@@ -25,6 +25,9 @@ enum Created {
     Saved(String),
     /// The user stepped out; nothing was written.
     Cancelled,
+    /// The write failed, with the reason. Surfaced loudly: a save that fails
+    /// quietly is the one thing the user cannot act on.
+    Failed(String),
 }
 
 /// What the menu can do with a saved task.
@@ -38,6 +41,10 @@ enum TaskAction {
 /// List saved tasks and act on one.
 pub(super) fn tasks_menu() {
     let cfg = config::load().unwrap_or_default();
+    // One-shot line on the menu footer. `println!` between prompts lands on the
+    // main screen, which the menu's alternate screen then covers — so the
+    // outcome of a wizard is reported where the user is actually looking.
+    let mut notice: Option<String> = None;
     loop {
         let tasks = config::load_tasks();
         let mut names: Vec<String> = tasks.keys().cloned().collect();
@@ -69,27 +76,32 @@ pub(super) fn tasks_menu() {
 
         let create_idx = names.len();
         let back_idx = names.len() + 1;
-        let picked = match menu::pick_single("Tasks", entries) {
+        let context = match notice.take() {
+            Some(n) => format!("Tasks ─ {n}"),
+            None => "Tasks".to_string(),
+        };
+        let picked = match menu::pick_single(&context, entries) {
             Step::Value(i) => i,
             // Nothing above this menu: Esc leaves.
             Step::Back | Step::Cancel => return,
         };
         match picked {
-            i if i == create_idx => match create_task(None) {
-                Created::Saved(name) => println!("✔ task '{name}' saved"),
-                Created::Cancelled => println!("— cancelled, nothing saved"),
-            },
+            i if i == create_idx => {
+                let outcome = create_task(None);
+                report(&outcome);
+                notice = notice_from(&outcome);
+            }
             i if i == back_idx => return,
             i => {
                 let id = names[i].clone();
-                task_menu(&id, &tasks[&id], &cfg);
+                task_menu(&id, &tasks[&id], &cfg, &mut notice);
             }
         }
     }
 }
 
 /// What one can do with a single task.
-fn task_menu(id: &str, task: &Task, cfg: &config::Config) {
+fn task_menu(id: &str, task: &Task, cfg: &config::Config, notice: &mut Option<String>) {
     let action = {
         let entries = vec![
             (
@@ -130,10 +142,11 @@ fn task_menu(id: &str, task: &Task, cfg: &config::Config) {
                 Step::Back | Step::Cancel => {}
             }
         }
-        TaskAction::Edit => match create_task(Some(task.clone())) {
-            Created::Saved(name) => println!("✔ task '{name}' updated"),
-            Created::Cancelled => println!("— unchanged"),
-        },
+        TaskAction::Edit => {
+            let outcome = create_task(Some(task.clone()));
+            report(&outcome);
+            *notice = notice_from(&outcome);
+        }
         TaskAction::Delete => {
             // Destructive: Enter keeps it, `y` deletes it.
             let sure = menu::confirm_back("Tasks", &format!("delete task '{id}'?"), false, true)
@@ -142,8 +155,15 @@ fn task_menu(id: &str, task: &Task, cfg: &config::Config) {
             if sure && let Some(dir) = config::tasks_dir() {
                 let path = dir.join(format!("{id}.toml"));
                 match std::fs::remove_file(&path) {
-                    Ok(()) => println!("✔ task '{id}' deleted"),
-                    Err(e) => crate::output::print_error(&format!("could not delete '{id}': {e}")),
+                    Ok(()) => {
+                        println!("✔ task '{id}' deleted");
+                        *notice = Some(format!("deleted '{id}'"));
+                    }
+                    Err(e) => {
+                        let why = format!("could not delete '{id}': {e}");
+                        report(&Created::Failed(why.clone()));
+                        *notice = Some(why);
+                    }
                 }
             }
         }
@@ -198,6 +218,13 @@ fn create_task(existing: Option<Task>) -> Created {
                 return finish(&name, accounts, editing);
             }
         };
+        // A remembered username belongs to the network it was typed for.
+        // Carrying it into a different site would offer an instagram handle as
+        // the answer for a tiktok prompt.
+        if previous_site.as_deref() != Some(site.as_str()) {
+            previous_username = None;
+            previous_kinds.clear();
+        }
         previous_site = Some(site.clone());
 
         // Its own level so the content question can escape back to it: the
@@ -247,9 +274,15 @@ fn create_task(existing: Option<Task>) -> Created {
                 match choice {
                     Step::Value(0) => return finish(&name, accounts, editing),
                     // Add another: leave this account entirely, not just the
-                    // detail loop, so the site is asked again. The remembered site
-                    // puts the cursor back on it.
-                    Step::Value(_) => break 'who,
+                    // detail loop, so the site is asked again. The remembered
+                    // site puts the cursor back on it, but the account and its
+                    // content are cleared — this is a different person, not a
+                    // correction.
+                    Step::Value(_) => {
+                        previous_username = None;
+                        previous_kinds.clear();
+                        break 'who;
+                    }
                     // Esc re-asks the content question with its selection
                     // still marked.
                     Step::Back => continue 'detail,
@@ -289,10 +322,37 @@ fn finish(
     };
     match config::write_task_file(&path, &task) {
         Ok(()) => Created::Saved(name.to_string()),
-        Err(e) => {
-            crate::output::print_error(&format!("could not save the task: {e}"));
-            Created::Cancelled
-        }
+        Err(e) => Created::Failed(format!("could not save '{name}': {e}")),
+    }
+}
+
+/// The one-line version of a wizard outcome, for the menu footer.
+fn notice_from(outcome: &Created) -> Option<String> {
+    match outcome {
+        Created::Saved(name) => Some(format!("saved '{name}'")),
+        Created::Cancelled => Some("cancelled".to_string()),
+        // A failure already got the loud treatment; repeating it on the
+        // footer would only be noise.
+        Created::Failed(_) => None,
+    }
+}
+
+/// Report the outcome of a wizard on the main screen, where it is readable.
+///
+/// Nothing is on screen while this waits: the menu has not redrawn yet, so the
+/// message is not covered by the alternate screen the way a bare `println!`
+/// between prompts is.
+fn report(outcome: &Created) {
+    let line = match outcome {
+        Created::Saved(name) => format!("✔ task '{name}' saved"),
+        Created::Cancelled => "— cancelled, nothing saved".to_string(),
+        Created::Failed(why) => format!("⚠ {why}"),
+    };
+    println!("{line}");
+    if matches!(outcome, Created::Failed(_)) {
+        let _ = inquire::Text::new("press Enter to continue")
+            .with_render_config(theme::render_config())
+            .prompt();
     }
 }
 
