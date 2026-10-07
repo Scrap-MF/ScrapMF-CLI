@@ -83,24 +83,41 @@ fn chrome_title(context: &str) -> String {
 /// border title, e.g. "Download content" → `╭ SCRAPMF v1.7.0 ─ Download content ─╮`.
 /// Returns the picked index, `Back` on Esc/q and `Cancel` on Ctrl+C.
 pub fn pick_single(context: &str, options: Vec<(String, Vec<String>)>) -> Step<usize> {
-    pick_single_inner(context, options, false)
+    pick_single_inner(context, options, false, None)
 }
 
 /// As [`pick_single`], but advertises that Esc steps back.
 pub fn pick_single_back(context: &str, options: Vec<(String, Vec<String>)>) -> Step<usize> {
-    pick_single_inner(context, options, true)
+    pick_single_inner(context, options, true, None)
+}
+
+/// As [`pick_single_back`], but with the cursor starting on `initial`.
+///
+/// A wizard that steps back re-opens the question on the answer it already
+/// has, instead of dropping the user at the top of the list. `initial` is
+/// clamped, so a stale index is harmless.
+pub fn pick_single_back_at(
+    context: &str,
+    options: Vec<(String, Vec<String>)>,
+    initial: usize,
+) -> Step<usize> {
+    pick_single_inner(context, options, true, Some(initial))
 }
 
 fn pick_single_inner(
     context: &str,
     options: Vec<(String, Vec<String>)>,
     back: bool,
+    cursor: Option<usize>,
 ) -> Step<usize> {
     if options.is_empty() {
         return Step::Cancel;
     }
     let title = chrome_title(context);
     let mut b = Browser::new(title).mode(Mode::Single);
+    if let Some(i) = cursor {
+        b = b.cursor_at(i);
+    }
     if back {
         b = b.hint(key_hint(true));
     }
@@ -236,11 +253,12 @@ fn confirm_key(key: crossterm::event::KeyCode, destructive: bool) -> Option<Step
     match key {
         // Enter takes the safe path: yes normally, no when destructive.
         KeyCode::Enter => Some(Step::Value(!destructive)),
-        // The explicit letters only exist where consent is not the default.
-        // An ordinary question is one Enter away, so keeping `y`/`n` there
-        // would only offer a second way to reach the same answer.
-        KeyCode::Char('y' | 'Y') if destructive => Some(Step::Value(true)),
-        KeyCode::Char('n' | 'N') if destructive => Some(Step::Value(false)),
+        KeyCode::Char('y' | 'Y') => Some(Step::Value(true)),
+        // `n` answers no on both kinds of question. On an ordinary question it
+        // is the only way to say no at all — dropping it in favour of Enter
+        // left questions like "add another account?" answerable only with yes
+        // or Esc, which is no way to decline.
+        KeyCode::Char('n' | 'N') => Some(Step::Value(false)),
         KeyCode::Esc => Some(Step::Back),
         _ => None,
     }
@@ -273,7 +291,7 @@ pub fn confirm_box(
         // Enter always answers "no" here, so the hint spells out `y`.
         "⏎ no · y yes · n no · esc back"
     } else {
-        "⏎ yes · esc back"
+        "⏎ yes · n no · esc back"
     };
 
     let mut boxed = match BoxedPrompt::enter(context) {
@@ -674,11 +692,23 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_questions_have_one_answer_key() {
-        // `y`/`n` only exist where consent is not the default; on an ordinary
-        // question Enter already answers it, so the letters must stay inert.
-        assert_eq!(confirm_key(KeyCode::Char('y'), false), None);
-        assert_eq!(confirm_key(KeyCode::Char('n'), false), None);
+    fn an_ordinary_question_can_still_be_declined() {
+        // Enter answers yes in one keystroke, but a question whose answer is
+        // often "no" needs a way to say so that is not Esc — Esc means "step
+        // back" everywhere else, and a caller that maps it to `false` is
+        // leaning on a side effect rather than a designed answer.
+        assert_eq!(
+            confirm_key(KeyCode::Char('n'), false),
+            Some(Step::Value(false))
+        );
+        assert_eq!(
+            confirm_key(KeyCode::Char('N'), false),
+            Some(Step::Value(false))
+        );
+        assert_eq!(
+            confirm_key(KeyCode::Char('y'), false),
+            Some(Step::Value(true))
+        );
     }
 
     #[test]

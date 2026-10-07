@@ -222,6 +222,70 @@ pub fn delete_profile(name: &str) -> Result<bool, String> {
     }
 }
 
+/// Resolve the session a scrape should use for one account.
+///
+/// A stored profile name wins over everything, and when it wins it also clears
+/// the browser source: mixing a named session with browser cookies would send
+/// two different identities in the same request. A named profile that has
+/// disappeared falls back to the site/browser defaults with a warning rather
+/// than failing, because a stale name should not cost the user their download.
+///
+/// The caller has already applied its own precedence above this (a profile
+/// resolves account > profile before asking); `site_cfg` is the last fallback.
+pub fn resolve_session(
+    cookie_profile: Option<&str>,
+    cookies_file: Option<PathBuf>,
+    cookies_browser: Option<String>,
+    site_cfg: Option<&crate::config::Site>,
+) -> (Option<PathBuf>, Option<String>) {
+    let mut file = cookies_file;
+    let mut browser = cookies_browser;
+    if let Some(site) = site_cfg {
+        if file.is_none() {
+            file = site.cookies.clone();
+        }
+        if browser.is_none() {
+            browser = site.cookies_from_browser.clone();
+        }
+    }
+    if let Some(name) = cookie_profile {
+        match profile_path(name) {
+            Some(p) if p.exists() => {
+                file = Some(p);
+                browser = None;
+            }
+            _ => {
+                eprintln!(
+                    "⚠ cookie profile '{name}' not found — falling back to browser/session defaults"
+                );
+            }
+        }
+    }
+    (file, browser)
+}
+
+/// Whether a stored profile actually carries cookies for any of `sites`.
+///
+/// Used to rank stored profiles so the ones that can authenticate a batch come
+/// first. Lives here rather than in a flow because every cookie picker needs it.
+pub fn has_cookies_for(name: &str, sites: &[String]) -> bool {
+    if sites.is_empty() {
+        return true;
+    }
+    let Ok(cookies) = load_profile(name) else {
+        return false;
+    };
+    sites.iter().any(|site| {
+        let domains = domains_for_site(site);
+        !domains.is_empty()
+            && cookies.iter().any(|c| {
+                domains
+                    .iter()
+                    .any(|d| c.domain == *d || c.domain.ends_with(&format!(".{d}")))
+            })
+    })
+}
+
 /// Human summary of a profile: total/expired cookies and domains covered.
 /// Domains beyond 2 are collapsed to keep the line within the menu width.
 pub fn profile_summary(name: &str) -> Result<String, String> {

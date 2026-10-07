@@ -64,6 +64,26 @@ pub(super) fn select_menu<T: std::fmt::Display + Clone>(
 /// scrape) run as internal batches via preview_and_execute. The home screen
 /// is a ratatui browser; picking an entry drops to the plain terminal for
 /// its inquire flow and returns to the browser afterwards.
+/// One option of the "Download content" submenu.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScrapeEntry {
+    SavedProfile,
+    Urls,
+    Quick,
+    Tasks,
+}
+
+/// Index → entry. `None` past the end, so a stale index cannot run something.
+fn scrape_entry_of(idx: usize) -> Option<ScrapeEntry> {
+    match idx {
+        0 => Some(ScrapeEntry::SavedProfile),
+        1 => Some(ScrapeEntry::Urls),
+        2 => Some(ScrapeEntry::Quick),
+        3 => Some(ScrapeEntry::Tasks),
+        _ => None,
+    }
+}
+
 pub fn run() {
     use home::Action;
 
@@ -75,6 +95,9 @@ pub fn run() {
         match action {
             Action::Scrape => {
                 use browser::{Browser, Outcome};
+                // Named rather than positional: this list grows, and a bare
+                // `Picked(3)` is the kind of dispatch that rots the moment an
+                // entry is inserted in the middle.
                 let outcome = Browser::new("Download content")
                     .entry(
                         "Saved profile",
@@ -99,23 +122,40 @@ pub fn run() {
                             "Fastest path: username in, media out.".to_string(),
                         ],
                     )
+                    .entry(
+                        "Tasks",
+                        vec![
+                            "Saved batches: content chosen once, reuse it.".to_string(),
+                            String::new(),
+                            "One or more accounts, each with its own".to_string(),
+                            "cookie session. Output under the task name.".to_string(),
+                        ],
+                    )
                     .run();
-                match outcome {
-                    Outcome::Picked(0) => {
+                let action = match outcome {
+                    Outcome::Picked(i) => scrape_entry_of(i),
+                    _ => None,
+                };
+                match action {
+                    Some(ScrapeEntry::SavedProfile) => {
                         prompt_scrape_as_profile();
                         clear_screen();
                     }
                     // Single entry for 1..N URLs: paste, auto-match site by
                     // pattern, run — no per-run prompts ("paste and go").
-                    Outcome::Picked(1) => {
+                    Some(ScrapeEntry::Urls) => {
                         scrape_flow::prompt_scrape_direct_urls();
                         clear_screen();
                     }
-                    Outcome::Picked(2) => {
+                    Some(ScrapeEntry::Quick) => {
                         prompt_quick_scrape();
                         clear_screen();
                     }
-                    _ => {}
+                    Some(ScrapeEntry::Tasks) => {
+                        tasks::tasks_menu();
+                        clear_screen();
+                    }
+                    None => {}
                 }
             }
             Action::Configuration => {
@@ -151,6 +191,7 @@ pub(crate) mod plugins_menu;
 mod profiles;
 mod scrape_flow;
 mod sites;
+mod tasks;
 pub(super) mod theme;
 
 pub(super) fn ask_nonempty(prompt: &str) -> Option<String> {

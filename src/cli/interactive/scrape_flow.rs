@@ -83,7 +83,7 @@ pub(super) fn prompt_cookie_override(sites: &[String]) -> Step<CookiePick> {
     let mut ranked: Vec<(bool, String)> = profiles
         .into_iter()
         .map(|name| {
-            let matches = site_has_cookies(&name, sites);
+            let matches = cookies::has_cookies_for(&name, sites);
             (matches, name)
         })
         .collect();
@@ -162,25 +162,6 @@ pub(super) fn describe_cookie_source(req: &ScrapeRequest) -> String {
 }
 
 /// Whether a stored profile holds at least one cookie for any of `sites`.
-fn site_has_cookies(name: &str, sites: &[String]) -> bool {
-    use crate::config::cookies;
-    if sites.is_empty() {
-        return true;
-    }
-    let Ok(cookies) = cookies::load_profile(name) else {
-        return false;
-    };
-    sites.iter().any(|site| {
-        let domains = cookies::domains_for_site(site);
-        !domains.is_empty()
-            && cookies.iter().any(|c| {
-                domains
-                    .iter()
-                    .any(|d| c.domain == *d || c.domain.ends_with(&format!(".{d}")))
-            })
-    })
-}
-
 /// Apply a chosen cookie file to a job, only when that job's site is one the
 /// file was chosen for.
 ///
@@ -196,13 +177,239 @@ fn distinct_sites(jobs: &[ScrapeJob]) -> Vec<String> {
     v
 }
 
-fn apply_cookie_file_to_site(jobs: &mut [ScrapeJob], file: &std::path::Path, sites: &[String]) {
-    for (req, site, ..) in jobs.iter_mut() {
-        if sites.iter().any(|s| s == site) {
+pub(super) fn apply_cookie_file_to_site(
+    jobs: &mut [ScrapeJob],
+    file: &std::path::Path,
+    sites: &[String],
+) {
+    apply_cookie_file_where(jobs, file, |_, site| sites.iter().any(|s| s == site));
+}
+
+/// Apply a cookie file only to the jobs `wants` selects.
+///
+/// Filtering by site is not enough once an account can carry its own session:
+/// two instagram accounts in one batch may need different identities, and a
+/// per-site filter would hand both of them the same one.
+pub(super) fn apply_cookie_file_where<F>(jobs: &mut [ScrapeJob], file: &std::path::Path, wants: F)
+where
+    F: Fn(usize, &str) -> bool,
+{
+    for (i, (req, site, ..)) in jobs.iter_mut().enumerate() {
+        if wants(i, site) {
             req.cookies_file = Some(file.to_path_buf());
             req.cookies_from_browser = None;
         }
     }
+}
+
+/// Everything one account's jobs need, independent of which flow asked.
+///
+/// Quick scrape and tasks both build jobs for a single (site, username, kinds)
+/// triple, and the per-site fan-out inside [`jobs_for_account`] is the part that
+/// is easy to get subtly wrong — twitter needs two passes because gallery-dl's
+/// directory conditionals are evaluated per file, and threads needs the profile
+/// pic separated because it takes its own flag. Shared here so a third caller
+/// cannot silently download half an account.
+pub(super) struct AccountCtx {
+    pub site: String,
+    pub username: String,
+    pub kinds: Vec<ContentKind>,
+    /// Tagged URLs for this account, so facebook ID resolution stays in the
+    /// caller that knows how to do it.
+    pub tagged: Vec<(ContentKind, String)>,
+    pub directory_template: Option<Vec<String>>,
+    pub extractor_options: std::collections::HashMap<String, toml::Value>,
+    pub extra_args: Vec<String>,
+    pub cookies_file: Option<std::path::PathBuf>,
+    pub cookies_from_browser: Option<String>,
+    pub archive: Option<std::path::PathBuf>,
+    pub rate_limit: Option<crate::config::RateLimit>,
+    pub filename_template: Option<String>,
+    /// Becomes `{scrapmf_root}`, so a task writes under its own name.
+    pub profile_name: String,
+    pub output_dir: std::path::PathBuf,
+}
+
+/// Build the jobs one account expands into.
+///
+/// `Err` carries the reason to skip that account, so a caller with several of
+/// them can name the account and the reason instead of aborting the batch.
+pub(super) fn jobs_for_account(c: &AccountCtx) -> Result<Vec<ScrapeJob>, String> {
+    // Bound by value because the per-site branches clone them repeatedly.
+    let site_name = c.site.clone();
+    let username = c.username.clone();
+    let profile_name = c.profile_name.clone();
+    let AccountCtx {
+        kinds,
+        directory_template: directory_template_raw,
+        extractor_options: extractor_options_raw,
+        extra_args,
+        archive,
+        rate_limit,
+        filename_template,
+        ..
+    } = &c;
+    let Some((url, extra_urls)) = select_urls(&c.tagged, &c.kinds) else {
+        return Err("no content selected".to_string());
+    };
+    if validate_url(&url).is_err() {
+        return Err(format!("invalid url {url}"));
+    }
+
+    let kinds_desc = super::content::kinds_description(&site_name, kinds);
+
+    // QUICK MODE — bake the resolved username into directory templates
+    let directory_template = directory_template_raw
+        .clone()
+        .map(|dirs| flatten_quick_dirs(dirs, &username));
+    let mut extractor_options = extractor_options_raw.clone();
+    for v in extractor_options.values_mut() {
+        if let toml::Value::Table(map) = v
+            && let Some(dir) = map.get_mut("directory")
+        {
+            flatten_for_quick(dir, &username);
+        }
+    }
+    // Final cookies for the jobs: the caller already resolved any
+    // per-run override over the site config.
+    let (cookies_file, cookies_from_browser) =
+        (c.cookies_file.clone(), c.cookies_from_browser.clone());
+
+    // `{scrapmf_root}` comes from the ctx, so quick scrape keeps rooting at the
+    // username while a task roots at its own name.
+    let base_req = |directory_override: Option<Vec<String>>,
+                    extra_opts: Vec<(String, String)>,
+                    extra_urls: Vec<String>| {
+        let mut directory_template_field = None;
+        let mut opts = extractor_options.clone();
+        apply_quick_override(
+            &mut opts,
+            &mut directory_template_field,
+            &site_name,
+            directory_override,
+            extra_opts,
+        );
+        ScrapeRequest {
+            url: url.clone(),
+            output: Some(c.output_dir.clone()),
+            preset: Some(site_name.clone()),
+            extra_args: extra_args.clone(),
+            cookies_from_browser: cookies_from_browser.clone(),
+            cookies_file: cookies_file.clone(),
+            archive: archive.clone(),
+            rate_limit: rate_limit.clone(),
+            extractor_options: opts,
+            filename_template: filename_template.clone(),
+            directory_template: directory_template_field,
+            extra_urls,
+            profile_name: Some(profile_name.clone()),
+            extra_extractor_opts: Vec::new(),
+
+            ..Default::default()
+        }
+    };
+
+    // Twitter Media needs TWO passes (see prompt_scrape_as_profile note):
+    // per-FILE conditional directories don't work on twitter.
+    if site_name == "twitter" {
+        let mut jobs = Vec::new();
+        for (pass, dir_name, filter) in [
+            ("photos", "photos", "type == 'photo'"),
+            ("videos", "videos", "type != 'photo'"),
+        ] {
+            let dirs = vec![
+                username.clone(),
+                "twitter".to_string(),
+                "{user[name]}".to_string(),
+                dir_name.to_string(),
+            ];
+            let req = base_req(
+                Some(dirs),
+                vec![("file-filter".to_string(), filter.to_string())],
+                Vec::new(),
+            );
+            jobs.push((
+                req,
+                site_name.clone(),
+                format!("{username} ({pass})"),
+                pass.to_string(),
+            ));
+        }
+        return Ok(jobs);
+    }
+
+    // Threads: fotos/videos (posts) and profile pic are separate — profile needs --profile-pic-only
+    // Always 3 separate jobs so the dashboard shows progress 1-by-1, even for All.
+    if site_name == "threads" {
+        use crate::cli::interactive::content::ContentKind;
+        let has_photos = kinds.contains(&ContentKind::Photos);
+        let has_videos = kinds.contains(&ContentKind::Videos);
+        let has_profile = kinds.contains(&ContentKind::Profile);
+        if has_photos || has_videos || has_profile {
+            let mut jobs = Vec::new();
+            if has_photos {
+                let photos_dirs = flatten_quick_dirs(
+                    vec![
+                        "{scrapmf_root}".to_string(),
+                        "{category}".to_string(),
+                        "{username}".to_string(),
+                        "photos".to_string(),
+                    ],
+                    &username,
+                );
+                let mut req_photos = base_req(Some(photos_dirs), Vec::new(), extra_urls.clone());
+                req_photos.extra_args.push("--photos-only".to_string());
+                jobs.push((
+                    req_photos,
+                    site_name.clone(),
+                    format!("{username} (photos)"),
+                    "photos".to_string(),
+                ));
+            }
+            if has_videos {
+                let videos_dirs = flatten_quick_dirs(
+                    vec![
+                        "{scrapmf_root}".to_string(),
+                        "{category}".to_string(),
+                        "{username}".to_string(),
+                        "videos".to_string(),
+                    ],
+                    &username,
+                );
+                let mut req_videos = base_req(Some(videos_dirs), Vec::new(), extra_urls.clone());
+                req_videos.extra_args.push("--videos-only".to_string());
+                jobs.push((
+                    req_videos,
+                    site_name.clone(),
+                    format!("{username} (videos)"),
+                    "videos".to_string(),
+                ));
+            }
+            if has_profile {
+                let profile_dirs = flatten_quick_dirs(
+                    vec![
+                        "{scrapmf_root}".to_string(),
+                        "{category}".to_string(),
+                        "{username}".to_string(),
+                        "profile".to_string(),
+                    ],
+                    &username,
+                );
+                let mut req_profile = base_req(Some(profile_dirs), Vec::new(), Vec::new());
+                req_profile.profile_pic_only = true;
+                jobs.push((
+                    req_profile,
+                    site_name.clone(),
+                    format!("{username} (profile)"),
+                    "profile".to_string(),
+                ));
+            }
+            return Ok(jobs);
+        }
+    }
+
+    let req = base_req(directory_template, Vec::new(), extra_urls);
+    Ok(vec![(req, site_name.clone(), username.clone(), kinds_desc)])
 }
 
 /// Run a batch inside the dashboard after the pre-flight preview.
@@ -434,7 +641,7 @@ pub(super) fn preview_and_execute(requests: Vec<ScrapeJob>, cfg: &config::Config
         });
 
         if was_cancelled {
-            println!("⚠ Ejecución cancelada por el usuario");
+            println!("⚠ canceled");
         }
         for rep in &job_reports {
             for (stderr, line) in rep {
@@ -1161,204 +1368,35 @@ pub(super) fn prompt_quick_scrape() {
                 } else {
                     build_tagged_urls(&site_name, &username)
                 };
-                let Some((url, extra_urls)) = select_urls(&tagged, &kinds) else {
-                    println!("ℹ No content selected");
-                    return;
-                };
-                if validate_url(&url).is_err() {
-                    eprintln!("warn: skipping invalid url {url}");
-                    return;
-                }
-
-                let kinds_desc = super::content::kinds_description(&site_name, &kinds);
-
-                // QUICK MODE — bake the resolved username into directory templates
-                let directory_template = directory_template_raw
-                    .clone()
-                    .map(|dirs| flatten_quick_dirs(dirs, &username));
-                let mut extractor_options = extractor_options_raw.clone();
-                for v in extractor_options.values_mut() {
-                    if let toml::Value::Table(map) = v
-                        && let Some(dir) = map.get_mut("directory")
-                    {
-                        flatten_for_quick(dir, &username);
-                    }
-                }
-                // Final cookies for the jobs: override wins over site config
-                let (cookies_file, cookies_from_browser) = if let Some(ref ov) = cookie_override {
+                // Final cookies for the jobs: override wins over site config.
+                let (cookies_file, cookies_from_browser) = if let Some(ref ov) = pick.file {
                     (Some(ov.clone()), None)
                 } else {
                     (cookies_file_cfg.clone(), cookies_from_browser_cfg.clone())
                 };
-
-                let base_req = |directory_override: Option<Vec<String>>,
-                                extra_opts: Vec<(String, String)>,
-                                extra_urls: Vec<String>,
-                                profile_name: String| {
-                    let mut directory_template_field = None;
-                    let mut opts = extractor_options.clone();
-                    apply_quick_override(
-                        &mut opts,
-                        &mut directory_template_field,
-                        &site_name,
-                        directory_override,
-                        extra_opts,
-                    );
-                    ScrapeRequest {
-                        url: url.clone(),
-                        output: Some(crate::config::expand_output_dir(&cfg.general.output_dir)),
-                        preset: Some(site_name.clone()),
-                        extra_args: extra_args.clone(),
-                        cookies_from_browser: cookies_from_browser.clone(),
-                        cookies_file: cookies_file.clone(),
-                        archive: archive.clone(),
-                        rate_limit: rate_limit.clone(),
-                        extractor_options: opts,
-                        filename_template: filename_template.clone(),
-                        directory_template: directory_template_field,
-                        extra_urls,
-                        profile_name: Some(profile_name),
-                        extra_extractor_opts: Vec::new(),
-
-                        ..Default::default()
+                let account = AccountCtx {
+                    site: site_name.clone(),
+                    username: username.clone(),
+                    kinds: kinds.clone(),
+                    tagged,
+                    directory_template: directory_template_raw.clone(),
+                    extractor_options: extractor_options_raw.clone(),
+                    extra_args: extra_args.clone(),
+                    cookies_file,
+                    cookies_from_browser,
+                    archive: archive.clone(),
+                    rate_limit: rate_limit.clone(),
+                    filename_template: filename_template.clone(),
+                    profile_name: username.clone(),
+                    output_dir: cfg.general.output_dir.clone(),
+                };
+                let jobs = match jobs_for_account(&account) {
+                    Ok(j) => j,
+                    Err(reason) => {
+                        println!("⚠ {username} — {reason}");
+                        continue 'kinds;
                     }
                 };
-
-                // Twitter Media needs TWO passes (see prompt_scrape_as_profile note):
-                // per-FILE conditional directories don't work on twitter.
-                if site_name == "twitter" {
-                    let root = username.clone();
-                    let mut jobs = Vec::new();
-                    for (pass, dir_name, filter) in [
-                        ("photos", "photos", "type == 'photo'"),
-                        ("videos", "videos", "type != 'photo'"),
-                    ] {
-                        let dirs = vec![
-                            username.clone(),
-                            "twitter".to_string(),
-                            "{user[name]}".to_string(),
-                            dir_name.to_string(),
-                        ];
-                        let req = base_req(
-                            Some(dirs),
-                            vec![("file-filter".to_string(), filter.to_string())],
-                            Vec::new(),
-                            root.clone(),
-                        );
-                        jobs.push((
-                            req,
-                            site_name.clone(),
-                            format!("{username} ({pass})"),
-                            pass.to_string(),
-                        ));
-                    }
-                    match preview_and_execute(jobs, &cfg) {
-                        Step::Value(()) | Step::Cancel => return,
-                        // Esc on the preview goes back to the cookie question
-                        // when there was one to go back to, and to the content
-                        // list when there was not.
-                        Step::Back => {
-                            if !pick.asked {
-                                continue 'kinds;
-                            }
-                        }
-                    }
-                }
-
-                // Threads: fotos/videos (posts) and profile pic are separate — profile needs --profile-pic-only
-                // Always 3 separate jobs so the dashboard shows progress 1-by-1, even for All.
-                if site_name == "threads" {
-                    use crate::cli::interactive::content::ContentKind;
-                    let has_photos = kinds.contains(&ContentKind::Photos);
-                    let has_videos = kinds.contains(&ContentKind::Videos);
-                    let has_profile = kinds.contains(&ContentKind::Profile);
-                    if has_photos || has_videos || has_profile {
-                        let mut jobs = Vec::new();
-                        if has_photos {
-                            let photos_dirs = flatten_quick_dirs(
-                                vec![
-                                    "{scrapmf_root}".to_string(),
-                                    "{category}".to_string(),
-                                    "{username}".to_string(),
-                                    "photos".to_string(),
-                                ],
-                                &username,
-                            );
-                            let mut req_photos = base_req(
-                                Some(photos_dirs),
-                                Vec::new(),
-                                extra_urls.clone(),
-                                username.clone(),
-                            );
-                            req_photos.extra_args.push("--photos-only".to_string());
-                            jobs.push((
-                                req_photos,
-                                site_name.clone(),
-                                format!("{username} (photos)"),
-                                "photos".to_string(),
-                            ));
-                        }
-                        if has_videos {
-                            let videos_dirs = flatten_quick_dirs(
-                                vec![
-                                    "{scrapmf_root}".to_string(),
-                                    "{category}".to_string(),
-                                    "{username}".to_string(),
-                                    "videos".to_string(),
-                                ],
-                                &username,
-                            );
-                            let mut req_videos = base_req(
-                                Some(videos_dirs),
-                                Vec::new(),
-                                extra_urls.clone(),
-                                username.clone(),
-                            );
-                            req_videos.extra_args.push("--videos-only".to_string());
-                            jobs.push((
-                                req_videos,
-                                site_name.clone(),
-                                format!("{username} (videos)"),
-                                "videos".to_string(),
-                            ));
-                        }
-                        if has_profile {
-                            let profile_dirs = flatten_quick_dirs(
-                                vec![
-                                    "{scrapmf_root}".to_string(),
-                                    "{category}".to_string(),
-                                    "{username}".to_string(),
-                                    "profile".to_string(),
-                                ],
-                                &username,
-                            );
-                            let mut req_profile = base_req(
-                                Some(profile_dirs),
-                                Vec::new(),
-                                Vec::new(),
-                                username.clone(),
-                            );
-                            req_profile.profile_pic_only = true;
-                            jobs.push((
-                                req_profile,
-                                site_name.clone(),
-                                format!("{username} (profile)"),
-                                "profile".to_string(),
-                            ));
-                        }
-                        match preview_and_execute(jobs, &cfg) {
-                            Step::Value(()) | Step::Cancel => return,
-                            Step::Back => {
-                                if !pick.asked {
-                                    continue 'kinds;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                let req = base_req(directory_template, Vec::new(), extra_urls, username.clone());
-                let jobs = vec![(req, site_name.clone(), username.clone(), kinds_desc)];
                 match preview_and_execute(jobs, &cfg) {
                     Step::Value(()) | Step::Cancel => return,
                     Step::Back => {
@@ -1685,7 +1723,7 @@ mod quick_flatten_tests {
             b"# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t0\tk\tv\n",
         )
         .expect("write");
-        // `site_has_cookies` consults the real profile store, so only assert the
+        // `has_cookies_for` consults the real profile store, so only assert the
         // domain-matching contract through the helper's own inputs.
         let unknown_domains = crate::config::cookies::domains_for_site("");
         assert!(

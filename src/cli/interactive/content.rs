@@ -29,7 +29,7 @@ impl ContentKind {
         }
     }
 
-    fn from_label(s: &str) -> Option<Self> {
+    pub(super) fn from_label(s: &str) -> Option<Self> {
         match s {
             "Posts" => Some(ContentKind::Posts),
             "Videos" => Some(ContentKind::Videos),

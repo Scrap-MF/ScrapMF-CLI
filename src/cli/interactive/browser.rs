@@ -63,6 +63,9 @@ pub struct Browser {
     mode: Option<Mode>,
     checked: Vec<usize>,
     hint: Option<String>,
+    /// Row the cursor starts on. A wizard that steps back wants to land on the
+    /// answer the user just gave instead of the top of the list.
+    cursor: Option<usize>,
 }
 
 impl Browser {
@@ -98,6 +101,13 @@ impl Browser {
         self
     }
 
+    /// Start the cursor on `idx`, clamped to the list. So a caller that steps
+    /// back can re-open the question on the answer it already has.
+    pub fn cursor_at(mut self, idx: usize) -> Self {
+        self.cursor = Some(idx);
+        self
+    }
+
     pub fn run(self) -> Outcome {
         let mode = self.mode.unwrap_or(Mode::Single);
         run_browser(
@@ -106,6 +116,7 @@ impl Browser {
             mode,
             &self.checked,
             self.hint.as_deref(),
+            self.cursor.unwrap_or(0),
         )
     }
 }
@@ -191,12 +202,23 @@ fn outcome_for(
     }
 }
 
+/// Where the cursor starts, given what the caller asked for.
+///
+/// A caller that steps back re-opens the question on the answer it already
+/// has, so it asks for a row index. That index can be stale by the time the
+/// menu opens, and an empty list has no row at all — either way it must land
+/// somewhere valid rather than index past the entries.
+fn clamp_cursor(requested: usize, len: usize) -> usize {
+    requested.min(len.saturating_sub(1))
+}
+
 fn run_browser(
     title: &str,
     entries: &[Entry],
     mode: Mode,
     prechecked: &[usize],
     hint: Option<&str>,
+    initial_cursor: usize,
 ) -> Outcome {
     // A cancelled multi-select is an *empty* selection, not a quit: pressing
     // Esc while picking kinds means "I chose none", which is a legitimate
@@ -217,7 +239,7 @@ fn run_browser(
         }
     };
 
-    let mut cursor: usize = 0;
+    let mut cursor: usize = clamp_cursor(initial_cursor, entries.len());
     let mut checked: Vec<bool> = vec![false; entries.len()];
     for i in prechecked {
         if let Some(v) = checked.get_mut(*i) {
@@ -448,6 +470,19 @@ mod tests {
         let mut c = vec![true];
         toggle_at(&mut c, 7);
         assert_eq!(c, vec![true]);
+    }
+
+    /// A wizard that steps back re-opens on the answer it already has, so the
+    /// cursor has to start there — and a stale index must not index past the
+    /// list. Checked on the clamp directly: driving the real browser needs a
+    /// terminal, which the test runner has no reason to have.
+    #[test]
+    fn the_initial_cursor_lands_somewhere_valid() {
+        assert_eq!(clamp_cursor(1, 3), 1);
+        assert_eq!(clamp_cursor(0, 3), 0);
+        assert_eq!(clamp_cursor(99, 3), 2, "past the end lands on the last row");
+        assert_eq!(clamp_cursor(5, 0), 0, "an empty list has no row");
+        assert_eq!(clamp_cursor(5, 1), 0);
     }
 
     #[test]

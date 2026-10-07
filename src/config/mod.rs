@@ -2,7 +2,7 @@ pub mod cookies;
 pub mod model;
 
 pub(crate) use fs::restrict_perms;
-pub use model::{Account, Config, General, Preset, Profile, RateLimit, Site};
+pub use model::{Account, Config, General, Preset, Profile, RateLimit, Site, Task, TaskAccount};
 
 use std::path::{Path, PathBuf};
 
@@ -18,7 +18,7 @@ pub use migrations::{
 };
 pub use templates::{
     ensure_example_sites, ensure_facebook_site, ensure_threads_site, ensure_tiktok_site,
-    ensure_twitter_site, ensure_vsco_site, write_profile_file,
+    ensure_twitter_site, ensure_vsco_site, write_profile_file, write_task_file,
 };
 
 fn expand_tilde(path: &Path) -> PathBuf {
@@ -31,6 +31,12 @@ pub fn sites_dir() -> Option<PathBuf> {
 
 pub fn profiles_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|p| p.join("scrapmf/profiles"))
+}
+
+/// Saved tasks live beside profiles but never inside them: same one-file-per-
+/// entry layout, different directory, different struct, different menus.
+pub fn tasks_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|p| p.join("scrapmf/tasks"))
 }
 
 /// Site matches URL if `pattern` or any of `patterns` is contained in it.
@@ -184,6 +190,26 @@ fn load_layered_sites(cfg: &mut Config, dir: &Path) {
     });
 }
 
+/// Read every `tasks/*.toml`, keyed by filename stem.
+///
+/// Separate from [`load_layered_profiles`] on purpose: a malformed task must
+/// not be able to take a profile down with it, and vice versa.
+pub fn load_tasks() -> std::collections::HashMap<String, Task> {
+    let mut out = std::collections::HashMap::new();
+    let Some(dir) = tasks_dir() else {
+        return out;
+    };
+    for_each_toml_file(&dir, &mut |stem, content| {
+        if let Ok(mut task) = toml::from_str::<Task>(&content) {
+            if task.task.is_none() {
+                task.task = Some(stem.to_string());
+            }
+            out.insert(stem.to_string(), task);
+        }
+    });
+    out
+}
+
 fn load_layered_profiles(cfg: &mut Config, dir: &Path) {
     for_each_toml_file(dir, &mut |stem, content| {
         if let Ok(mut profile) = toml::from_str::<Profile>(&content) {
@@ -299,7 +325,12 @@ pub fn ensure_config_dirs() -> anyhow::Result<()> {
         std::fs::create_dir_all(&base).context("create scrapmf config dir")?;
         crate::config::fs::restrict_perms(&base, true);
     }
-    for d in [sites_dir(), profiles_dir()].into_iter().flatten() {
+    // tasks_dir() belongs here too: it is the only reason `tasks/*.toml` can be
+    // written at all, since the atomic writer does not create parents.
+    for d in [sites_dir(), profiles_dir(), tasks_dir()]
+        .into_iter()
+        .flatten()
+    {
         std::fs::create_dir_all(&d).with_context(|| format!("create {}", d.display()))?;
         crate::config::fs::restrict_perms(&d, true);
     }
