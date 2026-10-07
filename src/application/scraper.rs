@@ -654,7 +654,7 @@ mod tests {
     #[test]
     fn classifies_tiktok_private_profile_login_wall_as_auth() {
         let msg = "scrape failed: https://www.tiktok.com/@demo_user/stories: \
-backend '/home/sebas/.local/share/scrapmf/bin/gallery-dl.bin' failed with exit code Some(4)\n  \
+    backend '/home/tester/.local/share/scrapmf/bin/gallery-dl.bin' failed with exit code Some(4)\n  \
 stderr: [tiktok][error] https://www.tiktok.com/@demo_user: Login required to access this \
 profile, or this profile has no videos posted";
         assert!(matches!(classify_failure(msg), FailureKind::AuthRequired));

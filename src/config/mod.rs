@@ -343,7 +343,7 @@ pub fn ensure_default_config() -> anyhow::Result<()> {
         return Ok(());
     };
     if path.exists() {
-        // Migrate old default output_dir that resolves to $HOME (e.g. "~", "~/", "/home/sebas")
+        // Migrate old default output_dir that resolves to $HOME (e.g. "~", "~/", "/home/tester")
         // to "~/scrapmf" — writing directly to $HOME would pollute it.
         if let Ok(s) = std::fs::read_to_string(&path)
             && let Ok(cfg) = toml::from_str::<crate::config::Config>(&s)
