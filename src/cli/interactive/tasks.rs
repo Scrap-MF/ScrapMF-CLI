@@ -724,10 +724,13 @@ fn run_task(task: &Task, cfg: &config::Config) -> Step<()> {
                     .as_ref()
                     .map(|s| s.extractor.clone())
                     .unwrap_or_default(),
-                extra_args: site_cfg
-                    .as_ref()
-                    .map(|s| s.extra_args.clone())
-                    .unwrap_or_default(),
+                extra_args: resolve_extra_args(
+                    site_cfg
+                        .as_ref()
+                        .map(|s| s.extra_args.as_slice())
+                        .unwrap_or(&[]),
+                    &account.extra_args,
+                ),
                 cookies_file,
                 cookies_from_browser,
                 archive: site_cfg.as_ref().and_then(|s| s.archive.clone()),
@@ -736,7 +739,11 @@ fn run_task(task: &Task, cfg: &config::Config) -> Step<()> {
                 // The task's name becomes `{scrapmf_root}`, so its media lands
                 // in its own tree instead of mixing with a profile's.
                 profile_name: task_id.clone(),
-                output_dir: cfg.general.output_dir.clone(),
+                output_dir: resolve_output_dir(
+                    account.output_dir.as_deref(),
+                    site_cfg.as_ref().and_then(|s| s.output_dir.as_deref()),
+                    &cfg.general.output_dir,
+                ),
             };
             match crate::cli::interactive::scrape_flow::jobs_for_account(&ctx) {
                 Ok(built) => {
@@ -813,6 +820,32 @@ fn prompt_cookie_override(sites: &[String]) -> Option<PathBuf> {
     }
 }
 
+/// Where one account's media goes: account, then site, then global.
+///
+/// `TaskAccount` flattens a profile `Account`, so a task file can carry
+/// `output_dir` — and silently ignoring it would be a field that reads as
+/// configured and does nothing. Same precedence the profile flow uses.
+fn resolve_output_dir(
+    account: Option<&std::path::Path>,
+    site: Option<&std::path::Path>,
+    global: &std::path::Path,
+) -> std::path::PathBuf {
+    account
+        .or(site)
+        .map(crate::config::expand_output_dir)
+        .unwrap_or_else(|| crate::config::expand_output_dir(global))
+}
+
+/// Extra args for one account: the site's first, then the account's.
+///
+/// The account's come last so they can override — the same order the profile
+/// flow builds them in.
+fn resolve_extra_args(site: &[String], account: &[String]) -> Vec<String> {
+    let mut out = site.to_vec();
+    out.extend(account.iter().cloned());
+    out
+}
+
 /// What one account can actually get: the content it asked for minus what the
 /// site has no menu entry for, with `"All"` meaning everything this site
 /// supports.
@@ -886,6 +919,7 @@ fn describe_kinds_owned(labels: &[&String]) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn kinds_for_site_keeps_only_what_the_site_offers() {
@@ -949,6 +983,57 @@ mod tests {
         a.account.username = Some(username.to_string());
         a.kinds = kinds.iter().map(|k| k.to_string()).collect();
         a
+    }
+
+    #[test]
+    fn the_accounts_output_dir_wins_over_the_sites_and_the_global() {
+        // A task file is meant to be hand-edited, so `output_dir` inside it has
+        // to do something — the same precedence the profile flow uses.
+        use super::resolve_output_dir;
+        let global = std::path::Path::new("/global");
+        assert_eq!(
+            resolve_output_dir(
+                Some(Path::new("/account")),
+                Some(Path::new("/site")),
+                global
+            ),
+            PathBuf::from("/account")
+        );
+    }
+
+    #[test]
+    fn without_an_account_output_dir_the_site_or_the_global_decides() {
+        use super::resolve_output_dir;
+        let global = std::path::Path::new("/global");
+        assert_eq!(
+            resolve_output_dir(None, Some(Path::new("/site")), global),
+            PathBuf::from("/site"),
+            "falls back to the site"
+        );
+        assert_eq!(
+            resolve_output_dir(None, None, global),
+            PathBuf::from("/global"),
+            "and to the global when the site says nothing"
+        );
+    }
+
+    #[test]
+    fn extra_args_append_the_accounts_after_the_sites() {
+        // Last wins is why the account's go second: an account can override
+        // something the site set for everyone.
+        use super::resolve_extra_args;
+        let site = vec!["--quiet".to_string(), "--retries".to_string()];
+        let account = vec!["--retries".to_string(), "9".to_string()];
+        assert_eq!(
+            resolve_extra_args(&site, &account),
+            vec![
+                "--quiet".to_string(),
+                "--retries".to_string(),
+                "--retries".to_string(),
+                "9".to_string()
+            ]
+        );
+        assert!(resolve_extra_args(&[], &[]).is_empty());
     }
 
     #[test]
