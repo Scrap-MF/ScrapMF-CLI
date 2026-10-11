@@ -448,7 +448,7 @@ mod tests {
         // Test that find_binary works without env mutation: create fake binary and check direct which
         let dir = tempfile::TempDir::new().expect("tempdir");
         let fake_bin = dir.path().join("fake-gallery-dl-test");
-        std::fs::write(&fake_bin, "#!/bin/sh\necho 1.32.9\n").expect("write");
+        std::fs::write(&fake_bin, "#!/bin/sh\necho 1.32.16\n").expect("write");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
