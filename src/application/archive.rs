@@ -16,7 +16,7 @@
 //! Working cache (disposable): `$XDG_DATA_HOME/scrapmf/cache/archive/<site>/<account>.sqlite`
 //! with gallery-dl's schema (`CREATE TABLE archive (entry TEXT PRIMARY KEY)`,
 //! column renamed from `file` to `entry` in newer gallery-dl versions; see
-//! `gallery_dl/archive.py` of v1.32.9).
+//! `gallery_dl/archive.py` of v1.32.16).
 //! Before each scrape we seed it with our known keys; after each scrape we
 //! drain rows gallery-dl inserted and append them to the JSONL. The cache is
 //! regenerable garbage — deleting it only costs one re-seed.
@@ -154,11 +154,13 @@ pub fn append_entries(
 
 // ─── Sqlite working cache (gallery-dl compatible) ──────────────────────────
 
-/// Seed the cache sqlite with `keys` using gallery-dl's exact schema (v1.32.9):
+/// Seed the cache sqlite with `keys` using gallery-dl's exact schema (v1.32.16):
 /// `CREATE TABLE IF NOT EXISTS archive (entry TEXT PRIMARY KEY) WITHOUT ROWID`.
-/// The column is `entry` — older gallery-dl used `file`, but v1.32.9 queries
-/// `WHERE entry=?` and fails with "no such column: entry" against the old
-/// schema. Creates/overwrites the DB at `path` and its parent dirs.
+/// The column is `entry` — older gallery-dl used `file`, but the pinned version
+/// queries `WHERE entry=?` and fails with "no such column: entry" against the
+/// old schema. Verified unchanged across 1.32.9..1.32.16: the archive module
+/// changed its connection handling, not its DDL. Creates/overwrites the DB at
+/// `path` and its parent dirs.
 pub fn seed_cache(path: &Path, keys: &HashSet<String>) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -287,7 +289,7 @@ mod tests {
         keys.insert("tiktok 222".to_string());
         seed_cache(&path, &keys).unwrap();
 
-        // gallery-dl adds one more during the "run" (v1.32.9 schema: entry column)
+        // gallery-dl adds one more during the "run" (pinned schema: entry column)
         let conn = rusqlite::Connection::open(&path).unwrap();
         conn.execute("INSERT INTO \"archive\" (entry) VALUES ('tiktok 333')", [])
             .unwrap();

@@ -183,9 +183,14 @@ pub fn validate_cookies_file(path: &std::path::Path) -> anyhow::Result<()> {
 
 pub fn validate_cookies_browser(browser: &str) -> anyhow::Result<()> {
     let id = browser.split(':').next().unwrap_or(browser);
-    let allowed = [
-        "firefox", "brave", "chrome", "chromium", "edge", "opera", "vivaldi", "whale",
-    ];
+    // Derived from CHANNELS so a channel that exists can be requested. This
+    // used to be a second hand-written list, which silently omitted every
+    // Brave variant (`brave-origin`, `brave-beta`, …) — they were in
+    // CHANNELS and readable by the capture path, but no request could name
+    // them, so a user whose session lives in Brave Origin could only ask for
+    // Brave-Browser and got the wrong profile. `whale` was listed here with
+    // no channel behind it and no reader for it; it was dead weight.
+    let allowed: Vec<&str> = crate::browsers::CHANNELS.iter().map(|c| c.id).collect();
     if !allowed.contains(&id) {
         anyhow::bail!(
             "unsupported browser '{id}' for --cookies-from-browser (allowed: {})",
@@ -375,36 +380,101 @@ pub fn scrape_with_hooks(
         {
             f(i + 1);
         }
-        match run_one_sub_scrape(&req, sub_url, dry_run, hooks.as_deref_mut(), abort) {
-            Ok(challenge_failures) => {
-                outcome.success_count += 1;
-                outcome.challenge_failures += challenge_failures;
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                match classify_failure(&msg) {
-                    FailureKind::AuthRequired => {
-                        outcome.skipped.push(format!("{sub_url}: {msg}"));
+        // A throttled sub-extractor is retried rather than accepted: the site
+        // asked us to slow down, which is a wait-and-continue, not a failure.
+        // gallery-dl does not retry a 429 itself (its `retry-codes` is empty
+        // for Instagram), so without this a single throttle silently costs the
+        // whole run and reports itself as a privacy problem.
+        let mut attempt = 0u32;
+        loop {
+            match run_one_sub_scrape(&req, sub_url, dry_run, hooks.as_deref_mut(), abort) {
+                Ok(challenge_failures) => {
+                    outcome.success_count += 1;
+                    outcome.challenge_failures += challenge_failures;
+                    break;
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let kind = classify_failure(&msg);
+                    if kind == FailureKind::RateLimited
+                        && attempt < MAX_RATE_LIMIT_RETRIES
+                        && !abort.load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        let wait = rate_limit_backoff_secs(attempt);
                         tracing::warn!(
                             url = %sub_url,
-                            error = %e,
-                            "sub-extractor skipped (auth required)"
+                            attempt = attempt + 1,
+                            wait_secs = wait,
+                            "rate limited; backing off before retry"
                         );
+                        if let Some(hooks) = hooks.as_deref_mut() {
+                            let f = &mut hooks.on_log;
+                            f(&format!(
+                                "[rate limited] {sub_url}: site throttled this request \
+                                 (HTTP 429); retrying in {wait}s (attempt {}/{})",
+                                attempt + 1,
+                                MAX_RATE_LIMIT_RETRIES + 1
+                            ));
+                        }
+                        // Sleep in slices so Ctrl+C stays responsive; a single
+                        // multi-minute sleep would make the run look hung and
+                        // would ignore the abort flag until it finished.
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(wait);
+                        loop {
+                            if abort.load(std::sync::atomic::Ordering::Relaxed) {
+                                break;
+                            }
+                            let left =
+                                deadline.saturating_duration_since(std::time::Instant::now());
+                            if left.is_zero() {
+                                break;
+                            }
+                            std::thread::sleep(left.min(std::time::Duration::from_secs(1)));
+                        }
+                        if abort.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+                        attempt += 1;
+                        continue;
                     }
-                    FailureKind::Unsupported => {
-                        outcome
-                            .skipped
-                            .push(format!("[unsupported] {sub_url}: {msg}"));
-                        tracing::warn!(
-                            url = %sub_url,
-                            error = %e,
-                            "sub-extractor skipped (unsupported URL)"
-                        );
+                    match kind {
+                        FailureKind::RateLimited => {
+                            // Out of retries: report it as the throttle it is,
+                            // not as the privacy verdict gallery-dl guessed.
+                            outcome
+                                .failed
+                                .push(format!("[rate limited] {sub_url}: {msg}"));
+                            tracing::warn!(
+                                url = %sub_url,
+                                attempts = attempt + 1,
+                                "rate limited after retries; giving up"
+                            );
+                        }
+                        FailureKind::AuthRequired => {
+                            outcome.skipped.push(format!("{sub_url}: {msg}"));
+                            tracing::warn!(
+                                url = %sub_url,
+                                error = %e,
+                                "sub-extractor skipped (auth required)"
+                            );
+                        }
+                        FailureKind::Unsupported => {
+                            outcome
+                                .skipped
+                                .push(format!("[unsupported] {sub_url}: {msg}"));
+                            tracing::warn!(
+                                url = %sub_url,
+                                error = %e,
+                                "sub-extractor skipped (unsupported URL)"
+                            );
+                        }
+                        FailureKind::Unknown => {
+                            outcome.failed.push(format!("{sub_url}: {msg}"));
+                            tracing::debug!(url = %sub_url, error = %e, "sub-extractor failed");
+                        }
                     }
-                    FailureKind::Unknown => {
-                        outcome.failed.push(format!("{sub_url}: {msg}"));
-                        tracing::debug!(url = %sub_url, error = %e, "sub-extractor failed");
-                    }
+                    break;
                 }
             }
         }
@@ -459,14 +529,73 @@ pub enum FailureKind {
     AuthRequired,
     /// No extractor can handle the URL — retrying with cookies won't help.
     Unsupported,
+    /// The site throttled the request (HTTP 429). Distinct from auth: the
+    /// session is fine and the content may be reachable later, so this is the
+    /// one kind worth waiting out and retrying.
+    RateLimited,
     /// Anything else: network errors, extractor bugs, unexpected output.
     Unknown,
+}
+
+/// True when a gallery-dl message shows the site throttled the request.
+///
+/// This exists because gallery-dl misreports a 429 as a privacy problem. Its
+/// Instagram lookup asks for `followed_by_viewer` and `friendship_status`; when
+/// the API answers 429 those fields never arrive, and gallery-dl reads their
+/// absence as "you do not follow this account" and logs `posts are private`:
+///
+/// ```python
+/// if check_private and user.get("is_private") and (
+///         not user.get("followed_by_viewer", True) or ...)
+/// ```
+///
+/// The two situations print the same line and need opposite responses — wait,
+/// versus go follow someone — so the distinction has to be made before the
+/// message reaches the user. The 429 itself is what separates them.
+pub fn is_rate_limited(msg: &str) -> bool {
+    // Match the status code only where it reads as an HTTP status: "429" on its
+    // own also occurs inside signed CDN URLs (an `oe=`/`_nc_` parameter), so a
+    // bare substring test would fire on a perfectly healthy download.
+    msg.contains("429 Too Many Requests")
+        || msg.contains("HTTP Error 429")
+        || msg.contains("HTTP error 429")
+        || msg.contains("Error 429")
+        || msg.contains("Too Many Requests")
+}
+
+/// True when gallery-dl logged the Instagram "posts are private" warning.
+pub fn is_private_warning(msg: &str) -> bool {
+    msg.contains("posts are private")
+}
+
+/// Retry budget per sub-extractor after a 429.
+///
+/// Two retries at 60s and 120s. Beyond that a run would spend minutes asleep
+/// and the throttle is more likely to be an account-level block that waiting
+/// out does not clear, so it is better to stop and say so.
+const MAX_RATE_LIMIT_RETRIES: u32 = 2;
+
+/// Backoff before retrying a throttled sub-extractor, in seconds.
+///
+/// Instagram's limit is per-account and recovers on the order of minutes, so
+/// a retry that fires in seconds would just earn a second 429 and deepen the
+/// throttle. Doubling from 60s gives two chances inside a couple of minutes
+/// without hammering.
+fn rate_limit_backoff_secs(attempt: u32) -> u64 {
+    const BASE: u64 = 60;
+    BASE.saturating_mul(1u64 << attempt.min(4)).min(15 * 60)
 }
 
 /// Classify a sub-extractor error message using gallery-dl's real failure
 /// signatures. Conservative: only well-known patterns map to the benign
 /// categories; everything else is treated as a hard failure.
 pub fn classify_failure(msg: &str) -> FailureKind {
+    // Checked before auth: a throttled run also tends to contain 403s and
+    // "private" wording, and telling the user to fix their session when the
+    // site simply asked them to slow down sends them to the wrong remedy.
+    if is_rate_limited(msg) {
+        return FailureKind::RateLimited;
+    }
     // gallery-dl raises its own AuthRequired exception for these cases.
     if msg.contains("AuthRequired")
         || msg.contains("401 Unauthorized")
@@ -479,6 +608,7 @@ pub fn classify_failure(msg: &str) -> FailureKind {
         // /video/<id> URLs still work; surface as auth-skip, not a crash.
         || msg.contains("Login required to access this profile")
         || msg.contains("private account")
+        || is_private_warning(msg)
         || msg.contains("authentication required")
     {
         return FailureKind::AuthRequired;
@@ -533,6 +663,89 @@ fn apply_sub_url_overrides(req: &mut ScrapeRequest, url: &str) {
     }
 }
 
+/// Turn a `cookies_from_browser` request into an explicit Netscape profile so
+/// gallery-dl authenticates with the session this run actually intended.
+///
+/// gallery-dl resolves the browser name to a profile directory itself, and its
+/// Brave mapping is a fallback *tuple*:
+///
+/// ```python
+/// "brave": (join(config, "BraveSoftware/Brave-Browser"),
+///           join(config, "BraveSoftware/Brave-Origin"))
+/// ```
+///
+/// It uses `Brave-Browser` whenever that directory exists and only falls back
+/// to `Brave-Origin` otherwise. When both are installed, a logged-out or
+/// server-side-revoked session in the first shadows a healthy one in the
+/// second, and Instagram answers `HTTP redirect to home page` while scrapmf's
+/// own cookie count looks correct — the two processes read different profiles.
+/// Capturing through scrapmf removes that ordering dependency.
+///
+/// Any failure here (locked OS keyring, undecryptable database, unresolvable
+/// site) leaves the request untouched, so `--cookies-from-browser` still runs
+/// exactly as before. This can only narrow the session, never widen the blast
+/// radius of a failure.
+fn resolve_cookie_capture(req: &mut ScrapeRequest) {
+    if req.cookies_file.is_some() {
+        return;
+    }
+    let Some(browser) = req.cookies_from_browser.clone() else {
+        return;
+    };
+    // A profile suffix (`brave:Profile 2`) only means something to the browser;
+    // scrapmf's capture reads the default profile, so leave those alone rather
+    // than silently scraping the wrong one.
+    if browser.contains(':') {
+        return;
+    }
+    let Some(site) = crate::sites::registry::find_by_url(&req.url) else {
+        return;
+    };
+    let sites = vec![site.id.to_string()];
+    let profile = format!("{}{browser}", crate::config::cookies::AUTO_PROFILE_PREFIX);
+    // Reuse the cache when it already covers this site. Re-reading the
+    // browser hits the OS keyring over D-Bus for every sub-extractor, and the
+    // session does not change mid-run, so the extra reads bought nothing. A
+    // cache that lacks this site is recaptured rather than used blind.
+    let cached = crate::config::cookies::profile_path(&profile)
+        .filter(|p| p.is_file())
+        .filter(|_| {
+            crate::config::cookies::load_profile(&profile)
+                .map(|cs| {
+                    cs.iter()
+                        .any(|c| sites.iter().any(|s| c.domain.contains(s.as_str())))
+                })
+                .unwrap_or(false)
+        });
+    if let Some(path) = cached {
+        tracing::debug!("reusing captured cookie profile {}", path.display());
+        req.cookies_file = Some(path);
+        req.cookies_from_browser = None;
+        return;
+    }
+    let captured = if browser.eq_ignore_ascii_case("firefox") {
+        crate::config::cookies::capture_firefox(&sites, &profile)
+    } else {
+        crate::config::cookies::capture_chromium(&browser, &sites, &profile)
+    };
+    match captured {
+        Ok((path, count)) => {
+            tracing::debug!(
+                "captured {count} cookie(s) from {browser} into {}",
+                path.display()
+            );
+            req.cookies_file = Some(path);
+            req.cookies_from_browser = None;
+        }
+        Err(e) => {
+            tracing::debug!(
+                "cookie capture from {browser} unavailable ({e}); \
+                 keeping --cookies-from-browser"
+            );
+        }
+    }
+}
+
 pub fn is_threads_url(url: &str) -> bool {
     url.contains("threads.com") || url.contains("threads.net")
 }
@@ -571,6 +784,7 @@ fn run_one_sub_scrape(
         let mut sub_req = req.clone();
         sub_req.url = url.to_string();
         apply_sub_url_overrides(&mut sub_req, url);
+        resolve_cookie_capture(&mut sub_req);
         let a = p.build_args(&sub_req)?;
         (bin, a)
     };
@@ -860,6 +1074,176 @@ profile, or this profile has no videos posted";
     fn validate_cookies_browser_rejects() {
         assert!(validate_cookies_browser("invalidbrowser").is_err());
         assert!(validate_cookies_browser("firefox; rm").is_err());
+    }
+
+    /// Every channel scrapmf can read must be nameable in a request.
+    ///
+    /// The allowlist used to be a separate hand-written array, so the Brave
+    /// variants were readable but unreachable: a user whose Instagram session
+    /// lived in Brave Origin had no way to ask for it and silently got
+    /// Brave-Browser instead.
+    #[test]
+    fn validate_cookies_browser_accepts_every_readable_channel() {
+        for ch in crate::browsers::CHANNELS {
+            assert!(
+                validate_cookies_browser(ch.id).is_ok(),
+                "channel '{}' can be read but cannot be requested",
+                ch.id
+            );
+        }
+    }
+
+    /// A channel scrapmf cannot resolve must stay rejected, otherwise the
+    /// derived allowlist would drift the other way and accept a browser that
+    /// silently yields no cookies.
+    #[test]
+    fn validate_cookies_browser_rejects_unknown_channels() {
+        assert!(validate_cookies_browser("definitely-not-a-browser").is_err());
+        assert!(validate_cookies_browser("").is_err());
+    }
+
+    // ─── Rate limiting (HTTP 429) ───────────────────────────────────────────
+
+    #[test]
+    fn rate_limit_is_recognised_across_gallery_dl_phrasings() {
+        for msg in [
+            "HttpError: '429 Too Many Requests' for 'https://www.instagram.com/api/v1/feed/'",
+            "[instagram][error] HTTP Error 429",
+            "HTTP error 429: Too Many Requests",
+            "Error 429",
+        ] {
+            assert!(super::is_rate_limited(msg), "missed a 429 phrasing: {msg}");
+        }
+    }
+
+    /// A signed CDN URL carries a hex `oe=` / `_nc_` parameter that can hold
+    /// the digits 429. Matching the bare number would classify a perfectly
+    /// healthy download as throttled and send the run into a minutes-long
+    /// retry loop over a failure that needs no waiting at all.
+    #[test]
+    fn digits_inside_a_cdn_url_are_not_a_rate_limit() {
+        let msg = "[downloader.http][warning] '403 Forbidden' for \
+'https://instagram.fna.fbcdn.net/v/t51.1/763379249_n.jpg?efg=eyJm&oe=6A916429\
+&_nc_sid=4291d3b'";
+        assert!(
+            !super::is_rate_limited(msg),
+            "a 429 inside a CDN URL must not read as throttling"
+        );
+    }
+
+    /// The whole point: gallery-dl reports a throttled request with the same
+    /// "posts are private" line it uses for a genuinely private account.
+    /// Telling the user to check their follow when the site asked them to slow
+    /// down sends them to the wrong remedy, and retrying nothing loses the run.
+    #[test]
+    fn a_throttled_private_warning_is_not_classified_as_auth() {
+        let msg = "backend failed with exit code Some(4)\n  stderr: \
+[instagram][warning] aura_putrefakta's posts are private\n\
+[instagram][error] HttpError: '429 Too Many Requests' for \
+'https://www.instagram.com/api/v1/feed/user/45710848586/'";
+        assert_eq!(
+            super::classify_failure(msg),
+            super::FailureKind::RateLimited,
+            "a 429 must win over the private-account wording it drags along"
+        );
+    }
+
+    /// Without the 429 the same warning means what it says. The TikTok and
+    /// Instagram private-profile paths depend on this and must not regress
+    /// into "wait and retry".
+    #[test]
+    fn private_warning_alone_stays_auth_required() {
+        let msg = "[instagram][warning] someone's posts are private";
+        assert_eq!(
+            super::classify_failure(msg),
+            super::FailureKind::AuthRequired
+        );
+        assert!(super::is_private_warning(msg));
+    }
+
+    #[test]
+    fn rate_limit_backoff_grows_and_is_bounded() {
+        let waits: Vec<u64> = (0..5).map(super::rate_limit_backoff_secs).collect();
+        assert_eq!(waits, vec![60, 120, 240, 480, 900]);
+        assert!(
+            waits.windows(2).all(|w| w[0] < w[1]),
+            "backoff must increase: {waits:?}"
+        );
+        assert!(
+            waits.iter().all(|w| *w <= 15 * 60),
+            "no single wait may exceed the cap: {waits:?}"
+        );
+    }
+
+    /// A request that already carries an explicit cookie file must not be
+    /// rewritten: the file is the more specific instruction.
+    #[test]
+    fn capture_never_overrides_an_explicit_cookie_file() {
+        let mut req = base_req();
+        req.cookies_file = Some(std::path::PathBuf::from("/tmp/explicit.txt"));
+        req.cookies_from_browser = Some("brave".to_string());
+        super::resolve_cookie_capture(&mut req);
+        assert_eq!(
+            req.cookies_file.as_deref(),
+            Some(std::path::Path::new("/tmp/explicit.txt")),
+            "an explicit cookie file must win over any browser capture"
+        );
+    }
+
+    /// The regression this exists for: capture is wired in where argv is built,
+    /// which is the single point both the interactive flow and `scrapmf scrape`
+    /// pass through. A wrong site must leave the browser flag intact so the
+    /// original behaviour survives.
+    #[test]
+    fn capture_leaves_browser_flag_when_the_site_is_unknown() {
+        let mut req = base_req();
+        req.url = "https://example.invalid/some/path".to_string();
+        req.cookies_from_browser = Some("brave".to_string());
+        super::resolve_cookie_capture(&mut req);
+        assert_eq!(
+            req.cookies_from_browser.as_deref(),
+            Some("brave"),
+            "an unresolvable site must keep --cookies-from-browser"
+        );
+        assert!(
+            req.cookies_file.is_none(),
+            "no site means no capture; a file must not appear out of nowhere"
+        );
+    }
+
+    /// A `browser:profile` suffix is meaningful only to the browser's own reader.
+    /// scrapmf captures the default profile, so honouring the suffix here would
+    /// silently authenticate as the wrong profile — leave those requests alone.
+    #[test]
+    fn capture_skips_requests_naming_an_explicit_browser_profile() {
+        let mut req = base_req();
+        req.url = "https://www.instagram.com/user/".to_string();
+        req.cookies_from_browser = Some("brave:Profile 2".to_string());
+        super::resolve_cookie_capture(&mut req);
+        assert_eq!(
+            req.cookies_from_browser.as_deref(),
+            Some("brave:Profile 2"),
+            "a profile-qualified browser must not be captured from the default profile"
+        );
+        assert!(req.cookies_file.is_none());
+    }
+
+    /// Whatever the capture decides, argv must still carry a session — either the
+    /// captured file or the browser flag. This is the invariant that keeps the
+    /// change strictly an improvement.
+    #[test]
+    fn capture_never_leaves_the_request_without_a_session() {
+        let mut req = base_req();
+        req.url = "https://www.instagram.com/user/".to_string();
+        req.cookies_from_browser = Some("definitely-not-a-browser".to_string());
+        super::resolve_cookie_capture(&mut req);
+        assert!(
+            req.cookies_file.is_some() || req.cookies_from_browser.is_some(),
+            "capture must never strip the session from the request"
+        );
+        if let Some(p) = req.cookies_file.as_ref() {
+            assert!(p.is_file(), "a captured profile must exist on disk: {p:?}");
+        }
     }
 
     #[test]

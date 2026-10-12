@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 ///    https://codeberg.org/mikf/gallery-dl/releases/tag/v{PIN}
 /// 2. Update this constant, run the full test suite.
 /// 3. Cut a new scrapmf release — users get the new pin via `scrapmf setup`.
-pub const GALLERY_DL_PIN: &str = "1.32.9";
+pub const GALLERY_DL_PIN: &str = "1.32.16";
 
 /// Legacy constant kept for callers that reference the Linux asset directly.
 pub const GALLERY_DL_ASSET: &str = "gallery-dl.bin";

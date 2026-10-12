@@ -38,7 +38,7 @@ pub fn ensure_example_sites() -> anyhow::Result<()> {
         return Ok(());
     }
     let mut extractor = std::collections::HashMap::new();
-    // Instagram highlights: use sub-extractor override with colon (gallery-dl 1.32.9: instagram:highlights)
+    // Instagram highlights: use sub-extractor override with colon (gallery-dl 1.32.16: instagram:highlights)
     // HIGHLIGHTS rule (specific): no date in filename/dir, identity via highlight_id+title / media_id
     //   instagram/highlights/{post_id}{highlight_title:?_//}/{media_id}.{extension} (inside instagram, same level as posts)
     //   archive handles dedup (no deterministic date fallback needed)
@@ -228,13 +228,13 @@ pub fn ensure_example_sites() -> anyhow::Result<()> {
 
 /// Ensure sites/tiktok.toml exists with 0o600 (no clobber).
 ///
-/// Variables VERIFIED against gallery-dl 1.32.9 source (`extractor/tiktok.py`):
+/// Variables VERIFIED against gallery-dl 1.32.16 source (`extractor/tiktok.py`):
 ///   - TikTok uses `{user}` (NOT `{username}` like Instagram)
 ///   - posts/stories items: `{id}` (post id), `{date}` (createTime), `{num}`
 ///     (carousel index, absent on single videos), `{file_id}`, `{title}`
 ///   - avatar: `{id}` = numeric user id, `{user}`, `{type}="avatar"`, `{file_id}`;
 ///     NO intrinsic date → avatar filename uses {file_id} (per avatar version)
-///   - highlights: NOT supported by gallery-dl 1.32.9 for TikTok — omitted
+///   - highlights: NOT supported by gallery-dl 1.32.16 for TikTok — omitted
 pub fn ensure_tiktok_site() -> anyhow::Result<()> {
     let Some(dir) = sites_dir() else {
         return Ok(());
@@ -340,7 +340,7 @@ pub fn ensure_tiktok_site() -> anyhow::Result<()> {
     let header = r#"# scrapmf — site config — tiktok
 # File: ~/.config/scrapmf/sites/tiktok.toml (0o600, dir 0o700)
 #
-# TikTok strategy (verified via gallery-dl 1.32.9 --list-extractors + source):
+# TikTok strategy (verified via gallery-dl 1.32.16 --list-extractors + source):
 #   PERFIL/  (scrapmf_root = profile name; output default ~/scrapmf)
 #   └── tiktok/
 #       └── CUENTA/  ({user} uniqueId)
@@ -351,9 +351,9 @@ pub fn ensure_tiktok_site() -> anyhow::Result<()> {
 #   AUDIO: music tracks are NOT downloaded (audio=false on posts+stories) — soundtracks, not content.
 #   NOTE: extension-based split does NOT work for tiktok videos (URLs lack extensions at
 #     directory time) — post_type keyword is used instead.
-#   HIGHLIGHTS: NOT SUPPORTED by gallery-dl 1.32.9 for tiktok (no extractor) — intentionally omitted.
+#   HIGHLIGHTS: NOT SUPPORTED by gallery-dl 1.32.16 for tiktok (no extractor) — intentionally omitted.
 #
-# Variables verified (gallery-dl 1.32.9 source): {user} (=uniqueId, NOT {username}),
+# Variables verified (gallery-dl 1.32.16 source): {user} (=uniqueId, NOT {username}),
 #   {id}, {date}, {num}, {title}, {file_id}. Avatar filename: {user}_{file_id}.
 #
 # Auth: tiktok returns 403 (JS challenge) without a valid session — open a tiktok.com
@@ -369,7 +369,7 @@ pub fn ensure_tiktok_site() -> anyhow::Result<()> {
 #         "https://www.tiktok.com/@USER/video/<id>" → author['id']):
 #          https://www.tiktok.com/@<authorId>/stories
 #   Note: story content APIs may still serve empty lists to non-browser
-#   sessions (upstream gallery-dl limitation, pinned v1.32.9).
+#   sessions (upstream gallery-dl limitation, unfixed through v1.32.16).
 # FALLBACK WARNING: -o ytdl=true routes extraction through yt-dlp, which CANNOT
 #   download TikTok photo carousels (it saves only the background audio track).
 #   Do NOT enable it here — you would silently lose every slideshow post.
@@ -390,7 +390,7 @@ pub fn ensure_tiktok_site() -> anyhow::Result<()> {
 
 /// Ensure sites/twitter.toml exists with 0o600 (no clobber).
 ///
-/// Variables VERIFIED against gallery-dl 1.32.9 source (`extractor/twitter.py`):
+/// Variables VERIFIED against gallery-dl 1.32.16 source (`extractor/twitter.py`):
 ///   - Auth REQUIRED: cookie `auth_token` from a logged-in x.com session
 ///   - media items carry `{type}` = "photo" | "video" (conditional directory split)
 ///   - tweet keywords: `{tweet_id}`, `{date}` (upload datetime), `{num}`,
@@ -482,7 +482,7 @@ pub fn ensure_twitter_site() -> anyhow::Result<()> {
     let header = r#"# scrapmf — site config — twitter / X
 # File: ~/.config/scrapmf/sites/twitter.toml (0o600, dir 0o700)
 #
-# Twitter/X strategy (verified via gallery-dl 1.32.9 --list-extractors + source):
+# Twitter/X strategy (verified via gallery-dl 1.32.16 --list-extractors + source):
 #   PERFIL/  (scrapmf_root = profile name; output default ~/scrapmf)
 #   └── twitter/
 #       └── CUENTA/  ({user[name]})
@@ -504,7 +504,7 @@ pub fn ensure_twitter_site() -> anyhow::Result<()> {
 
 /// Ensure sites/vsco.toml exists with 0o600 (no clobber).
 ///
-/// Variables VERIFIED against gallery-dl 1.32.9 source (`extractor/vsco.py`)
+/// Variables VERIFIED against gallery-dl 1.32.16 source (`extractor/vsco.py`)
 /// and live tests:
 ///   - NO auth required: API token is auto-extracted from the page's
 ///     __PRELOADED_STATE__ as an anonymous visitor
@@ -592,7 +592,7 @@ pub fn ensure_vsco_site() -> anyhow::Result<()> {
     let header = r#"# scrapmf — site config — vsco
 # File: ~/.config/scrapmf/sites/vsco.toml (0o600, dir 0o700)
 #
-# VSCO strategy (verified via gallery-dl 1.32.9 --list-extractors + source):
+# VSCO strategy (verified via gallery-dl 1.32.16 --list-extractors + source):
 #   PERFIL/  (scrapmf_root = profile name; output default ~/scrapmf)
 #   └── vsco/
 #       └── CUENTA/  ({user} handle)
@@ -676,7 +676,8 @@ pub fn ensure_threads_site() -> anyhow::Result<()> {
 }
 
 /// Ensure sites/facebook.toml exists with 0o600 (no clobber).
-/// Facebook strategy — via gallery-dl (verified 1.32.9 via -K).
+/// Facebook strategy — via gallery-dl (re-verified 1.32.16 via source; the
+/// facebook extractor is byte-identical across 1.32.9..1.32.16).
 /// Separates publicaciones/álbumes/videos/perfil + historias/destacadas (featured)
 /// like instagram:highlights (placeholders until upstream stories/highlights).
 pub fn ensure_facebook_site() -> anyhow::Result<()> {
@@ -863,7 +864,7 @@ pub fn ensure_facebook_site() -> anyhow::Result<()> {
     let body = toml::to_string_pretty(&site).context("serialize facebook site")?;
     let header = r#"# scrapmf — site config — facebook
 # File: ~/.config/scrapmf/sites/facebook.toml (0o600, dir 0o700)
-# Gallery-dl 1.32.9: facebook:user dispatches photos/albums/avatar/info; set/video handle albums/videos.
+# Gallery-dl 1.32.16 (unchanged from 1.32.9): facebook:user dispatches photos/albums/avatar/info; set/video handle albums/videos.
 # Auth: siempre requiere sesión (c_user/xs) — brave cookies o --cookies file (no anon como vsco).
 # Árbol: PERFIL/facebook/CUENTA/{photos,albums/<title (set)/>,videos,profile}
 #   Publicaciones → photos/ {date}_{id}_{num}.{ext}

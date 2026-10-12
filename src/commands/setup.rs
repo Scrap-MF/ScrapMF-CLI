@@ -22,12 +22,31 @@ pub fn run(yes: bool) -> Result<()> {
             .clone(),
     );
     if let backend::Source::Managed(p) = &source {
-        output::print_success(&format!(
-            "bundled gallery-dl v{GALLERY_DL_PIN} already installed at {}",
-            p.display()
+        let installed = installed_version(p);
+        if installed.as_deref() == Some(GALLERY_DL_PIN) {
+            output::print_success(&format!(
+                "bundled gallery-dl v{GALLERY_DL_PIN} already installed at {}",
+                p.display()
+            ));
+            return Ok(());
+        }
+        // The file exists but is not the pinned build. Previously this branch
+        // returned unconditionally, so a new pin could never reach anyone who
+        // had already installed a backend once: `setup` reported "already
+        // installed" while the binary on disk was the old version. A user who
+        // bumped the pin got a scraper still wired to a gallery-dl too old for
+        // the site's current API, with no error anywhere to say so.
+        let (installed_str, kind) = match installed {
+            Some(v) => (v, "older"),
+            None => ("unreadable".to_string(), "unknown"),
+        };
+        output::print_info(&format!(
+            "installed gallery-dl is {installed_str}, pinned build is {GALLERY_DL_PIN}"
         ));
-        print_version(p);
-        return Ok(());
+        output::print_info(&format!(
+            "replacing the managed copy ({kind} than the pin) — the pin follows \
+             scrapmf's release, so this is expected after an update"
+        ));
     }
     output::print_info(&format!(
         "Current resolution: {}",
@@ -35,7 +54,7 @@ pub fn run(yes: bool) -> Result<()> {
             backend::Source::Missing => "no gallery-dl found".to_string(),
             s => format!(
                 "{} ({})",
-                s.path().unwrap_or(Path::new("?")).display(),
+                s.path().unwrap_or(std::path::Path::new("?")).display(),
                 s.label()
             ),
         }
@@ -256,6 +275,26 @@ fn install_managed(yes: bool) -> Result<()> {
     output::print_info("  It never updates on its own; new pins ship with scrapmf releases.");
     print_version(&target);
     Ok(())
+}
+
+/// Version string reported by an installed gallery-dl binary, if it answers.
+///
+/// `None` means "could not ask" — a missing file, a binary that will not run,
+/// or output that does not start with a version-looking token. Callers treat
+/// that as "not the pinned build" and reinstall, which is the safe direction:
+/// a failed probe must never freeze a stale backend in place.
+fn installed_version(path: &Path) -> Option<String> {
+    let out = crate::process::Executor::run_capturing(
+        &path.to_string_lossy(),
+        &[std::ffi::OsString::from("--version")],
+    )
+    .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // "1.32.9" or "1.32.9\n..." — take the first whitespace-delimited token.
+    let token = text.split_whitespace().next()?.to_string();
+    token
+        .starts_with(|c: char| c.is_ascii_digit())
+        .then_some(token)
 }
 
 fn print_version(path: &Path) {
