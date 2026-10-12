@@ -63,12 +63,22 @@ pub struct Browser {
     mode: Option<Mode>,
     checked: Vec<usize>,
     hint: Option<String>,
-    /// Row the cursor starts on. A wizard that steps back wants to land on the
-    /// answer the user just gave instead of the top of the list.
+    /// Row the cursor starts on. A wizard that steps back wants to land on
+    /// the answer the user just gave instead of the top of the list.
     cursor: Option<usize>,
+    /// Lines above the entries — the subject of the menu. A caller that
+    /// printed these with `println!` before opening the chrome lost them: the
+    /// alternate screen covered them the moment it drew.
+    header: Vec<String>,
 }
 
 impl Browser {
+    /// Set the lines shown above the entries.
+    pub fn header(mut self, lines: Vec<String>) -> Self {
+        self.header = lines;
+        self
+    }
+
     pub fn new(title: impl Into<String>) -> Self {
         Self {
             title: title.into(),
@@ -112,6 +122,7 @@ impl Browser {
         let mode = self.mode.unwrap_or(Mode::Single);
         run_browser(
             &self.title,
+            &self.header,
             &self.entries,
             mode,
             &self.checked,
@@ -214,6 +225,7 @@ fn clamp_cursor(requested: usize, len: usize) -> usize {
 
 fn run_browser(
     title: &str,
+    header: &[String],
     entries: &[Entry],
     mode: Mode,
     prechecked: &[usize],
@@ -264,12 +276,28 @@ fn run_browser(
     use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
     while !confirmed && !went_back && !abandoned {
         let _ = terminal.draw(|f| {
+            let header_len = if header.is_empty() {
+                0
+            } else {
+                (header.len() as u16 + 1).min(6)
+            };
             let chunks = Layout::vertical([
+                Constraint::Length(header_len),
                 Constraint::Percentage(52),
                 Constraint::Percentage(38),
                 Constraint::Length(1),
             ])
             .split(f.area());
+
+            if !header.is_empty() {
+                let text: Vec<Line> = header.iter().map(|h| Line::raw(h.clone())).collect();
+                let p = Paragraph::new(text).block(
+                    Block::bordered()
+                        .border_set(ratatui::symbols::border::ROUNDED)
+                        .title(" "),
+                );
+                f.render_widget(p, chunks[0]);
+            }
 
             let rows: Vec<Line> = entries
                 .iter()
@@ -302,7 +330,7 @@ fn run_browser(
                     .border_set(ratatui::symbols::border::ROUNDED)
                     .title(chrome),
             );
-            f.render_widget(nav, chunks[0]);
+            f.render_widget(nav, chunks[1]);
 
             let detail: Vec<Line> = entries[cursor]
                 .details
@@ -314,7 +342,7 @@ fn run_browser(
                     .border_set(ratatui::symbols::border::ROUNDED)
                     .title(" details "),
             );
-            f.render_widget(details, chunks[1]);
+            f.render_widget(details, chunks[2]);
 
             // An explicit hint from the caller wins, so a screen that steps back
             // on Esc can advertise it; otherwise fall back to the per-mode text.
@@ -330,7 +358,7 @@ fn run_browser(
                 }
                 .to_string(),
             };
-            f.render_widget(Paragraph::new(hints), chunks[2]);
+            f.render_widget(Paragraph::new(hints), chunks[3]);
         });
 
         let has_event =

@@ -14,6 +14,7 @@ pub(super) fn clear_screen() {
 /// without needing `clear_screen` or `theme::render_config`.
 pub struct DecoratedSelect<T> {
     prompt: String,
+    details: Vec<String>,
     options: Vec<T>,
 }
 
@@ -37,7 +38,8 @@ impl<T: std::fmt::Display + Clone> DecoratedSelect<T> {
             .map(|o| (o.to_string(), Vec::new()))
             .collect();
         let title = self.prompt.clone();
-        match crate::cli::interactive::menu::pick_single(&title, opts) {
+        let details = self.details;
+        match crate::cli::interactive::menu::pick_single_details(&title, details, opts) {
             crate::cli::interactive::menu::Step::Value(idx) => Ok(self.options[idx].clone()),
             // Outside a multi-step flow Esc and Ctrl+C both mean "leave".
             crate::cli::interactive::menu::Step::Back
@@ -56,6 +58,25 @@ pub(super) fn select_menu<T: std::fmt::Display + Clone>(
 ) -> DecoratedSelect<T> {
     DecoratedSelect {
         prompt: prompt.to_string(),
+        details: Vec::new(),
+        options,
+    }
+}
+
+/// As [`select_menu`], but with lines shown above the options inside the
+/// Browser chrome.
+///
+/// A `println!` header written before the menu opened is covered as soon as
+/// the chrome renders, so the information never reached the screen. Passing it
+/// as `details` puts it inside the box, where it stays visible.
+pub(super) fn select_menu_with_details<T: std::fmt::Display + Clone>(
+    prompt: &str,
+    details: Vec<String>,
+    options: Vec<T>,
+) -> DecoratedSelect<T> {
+    DecoratedSelect {
+        prompt: prompt.to_string(),
+        details,
         options,
     }
 }
