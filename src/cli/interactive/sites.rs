@@ -1,8 +1,26 @@
 use super::profiles::{edit_profile_menu, prompt_new_profile_accounts};
-use super::{ask_nonempty, clear_screen, edit_with_editor, select_menu, theme::render_config};
+use super::{
+    ask_nonempty, clear_screen, edit_with_editor, select_menu, select_menu_with_details,
+    theme::render_config,
+};
 use std::path::Path;
 
 use inquire::Text;
+
+/// Show a result inside the Browser chrome and wait for acknowledgement.
+///
+/// The menus here draw on the alternate screen, so a `println!` issued between
+/// two of them was covered the moment the next box appeared — the action
+/// looked like it had done nothing. This renders in the same chrome as every
+/// other prompt.
+fn notice(lines: &[String]) {
+    crate::cli::interactive::menu::notice("Cookie profiles", lines);
+}
+
+/// As [`notice`], for the settings and site menus.
+fn notice_in(context: &str, lines: &[String]) {
+    crate::cli::interactive::menu::notice(context, lines);
+}
 
 pub(super) fn configuration_submenu() {
     use crate::cli::interactive::browser::{Browser, Outcome};
@@ -158,27 +176,35 @@ fn general_settings_menu() {
             }
             let new_path = std::path::PathBuf::from(&new_val);
             if let Err(e) = crate::application::scraper::validate_output_path(&new_path) {
-                println!("✖ invalid path: {e}");
-                std::thread::sleep(std::time::Duration::from_millis(1500));
+                notice_in(
+                    "Configuration ─ General settings",
+                    &[format!("✖ invalid path: {e}")],
+                );
                 continue;
             }
             let expanded = crate::config::expand_output_dir(&new_path);
             if let Some(home) = dirs::home_dir()
                 && expanded == home
             {
-                println!(
-                    "✖ output directory cannot be $HOME itself — use a subdirectory like ~/scrapmf"
+                notice_in(
+                    "Configuration ─ General settings",
+                    &["✖ output directory cannot be $HOME itself — use a subdirectory like ~/scrapmf"
+                        .to_string()],
                 );
-                std::thread::sleep(std::time::Duration::from_millis(1500));
                 continue;
             }
             let mut new_cfg = cfg.clone();
             new_cfg.general.output_dir = new_path;
             match crate::config::save(&new_cfg) {
-                Ok(()) => println!("✔ saved → {cfg_path}"),
-                Err(e) => println!("✖ save failed: {e}"),
+                Ok(()) => notice_in(
+                    "Configuration ─ General settings",
+                    &[format!("✔ saved → {cfg_path}")],
+                ),
+                Err(e) => notice_in(
+                    "Configuration ─ General settings",
+                    &[format!("✖ save failed: {e}")],
+                ),
             }
-            std::thread::sleep(std::time::Duration::from_millis(1000));
         } else if choice.starts_with("Download archive:") {
             let new_val = !cfg.general.archive;
             let label = if new_val { "enabled" } else { "disabled" };
@@ -197,13 +223,20 @@ fn general_settings_menu() {
             let mut new_cfg = cfg.clone();
             new_cfg.general.archive = new_val;
             match crate::config::save(&new_cfg) {
-                Ok(()) => println!("✔ archive {label} → {cfg_path}"),
-                Err(e) => println!("✖ save failed: {e}"),
+                Ok(()) => notice_in(
+                    "Configuration ─ General settings",
+                    &[format!("✔ archive {label} → {cfg_path}")],
+                ),
+                Err(e) => notice_in(
+                    "Configuration ─ General settings",
+                    &[format!("✖ save failed: {e}")],
+                ),
             }
-            std::thread::sleep(std::time::Duration::from_millis(1000));
         } else if choice == "Show config path" {
-            println!("{cfg_path}");
-            let _ = Text::new("Press enter to continue").prompt();
+            notice_in(
+                "Configuration ─ General settings",
+                std::slice::from_ref(&cfg_path),
+            );
         } else if choice == "Edit raw config.toml ($EDITOR)" {
             if let Some(p) = crate::config::config_path() {
                 // Ensure file exists before opening editor
@@ -299,7 +332,7 @@ fn create_profile_wizard() {
         .filter_map(|i| net_opts.get(i).map(|(l, _)| l.clone()))
         .collect();
     if picked_raw.is_empty() {
-        println!("ℹ No networks selected");
+        notice(&["ℹ No networks selected".to_string()]);
         return;
     }
     // Labels carry ANSI; map back to clean keys via brand_site_label output.
@@ -332,13 +365,12 @@ fn create_profile_wizard() {
         cookies::capture_chromium(&browser, &sites, &name)
     };
     match result {
-        Ok((path, count)) => {
-            println!("✔ {count} cookie(s) → {}", path.display());
-            println!("⚠ Cookie files grant account access — never share them.");
-        }
-        Err(e) => println!("✖ {e}"),
+        Ok((path, count)) => notice(&[
+            format!("✔ {count} cookie(s) → {}", path.display()),
+            "⚠ Cookie files grant account access — never share them.".to_string(),
+        ]),
+        Err(e) => notice(&[format!("✖ {e}")]),
     }
-    std::thread::sleep(std::time::Duration::from_millis(2200));
 }
 
 fn cookie_profiles_menu() {
@@ -378,8 +410,7 @@ fn browse_profiles_menu() {
     loop {
         let names = cookies::list_profiles();
         if names.is_empty() {
-            println!("ℹ No profiles yet — use Create or Import first");
-            std::thread::sleep(std::time::Duration::from_millis(1200));
+            notice(&["ℹ No profiles yet — use Create or Import first".to_string()]);
             return;
         }
         let rows: Vec<String> = names
@@ -402,8 +433,9 @@ fn browse_profiles_menu() {
 fn profile_detail_menu(name: &str) {
     use crate::config::cookies;
     loop {
-        clear_screen();
-        // Header with current summary
+        // Header rendered inside the chrome: printed with `println!` it was
+        // covered by the menu that opened next, so the summary and path of
+        // the selected profile were never actually shown.
         let summary = match cookies::profile_summary(name) {
             Ok(s) => s,
             Err(e) => format!("⚠ {e}"),
@@ -411,79 +443,60 @@ fn profile_detail_menu(name: &str) {
         let path = cookies::profile_path(name)
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        println!("  ◆ {name}");
-        println!("    {summary}");
-        println!("    {path}");
-        println!();
         let choices: Vec<String> = vec![
             "View details".into(),
             "Refresh — re-capture from browser".into(),
             "Delete profile".into(),
             "Back".into(),
         ];
-        let choice = match select_menu(&format!("Profile: {name}"), choices).prompt() {
+        let choice = match select_menu_with_details(
+            &format!("Profile: {name}"),
+            vec![summary.clone(), path.clone()],
+            choices,
+        )
+        .prompt()
+        {
             Ok(c) => c,
             Err(_) => return,
         };
         match choice.as_str() {
             "View details" => {
-                clear_screen();
-                println!("  ◆ {name} — details");
-                println!("  ───────────────────────────────────────");
-                println!("  {summary}");
-                println!("  File: {path}");
+                let mut lines = vec![summary.to_string(), format!("File: {path}")];
                 if let Some(p) = cookies::profile_path(name)
                     && let Ok(content) = std::fs::read_to_string(p)
                 {
-                    if let Some(meta) = cookies::parse_source_metadata(&content) {
-                        println!(
-                            "  Source: {} — networks: {}",
+                    match cookies::parse_source_metadata(&content) {
+                        Some(meta) => lines.push(format!(
+                            "Source: {} — networks: {}",
                             meta.browser,
                             meta.networks.join(", ")
-                        );
-                    } else {
-                        println!("  Source: manual import (no browser metadata)");
-                    }
-                }
-                let _ = Text::new("Press enter to continue").prompt();
-            }
-            "Refresh — re-capture from browser" => {
-                println!("→ Re-capturing '{name}'…");
-                match cookies::refresh_profile(name) {
-                    Ok(cookies::Refresh::Done { path, count }) => {
-                        println!("✔ refreshed {count} cookie(s) → {}", path.display());
-                        println!("✔ accounts using this profile need no changes");
-                        let _ = Text::new("Press enter to continue").prompt();
-                    }
-                    Ok(cookies::Refresh::ManualImportRequired) => {
-                        println!(
-                            "ℹ This profile was imported manually — it has no browser to re-capture from."
-                        );
-                        println!(
-                            "  To refresh, re-export with 'Get cookies.txt LOCALLY' while logged in,"
-                        );
-                        println!("  then use Import profile → From file / Paste.");
-                        let go_import = crate::cli::interactive::menu::confirm_back(
-                            "Cookie profiles",
-                            "Open Import menu now?",
-                            false,
-                            false,
-                        )
-                        .value()
-                        .unwrap_or(false);
-                        if go_import {
-                            import_profile_submenu_prefilled(name);
-                        } else {
-                            let _ = Text::new("Press enter to continue").prompt();
+                        )),
+                        None => {
+                            lines.push("Source: manual import (no browser metadata)".to_string());
                         }
                     }
-                    Err(e) => {
-                        println!("✖ refresh failed: {e}");
-                        println!(
-                            "  tip: is the browser closed? Try again, or re-create with Create profile"
-                        );
-                        let _ = Text::new("Press enter to continue").prompt();
-                    }
+                }
+                notice(&lines);
+            }
+            "Refresh — re-capture from browser" => {
+                let result = cookies::refresh_profile(name);
+                match result {
+                    Ok(cookies::Refresh::Done { path, count }) => notice(&[
+                        format!("✔ refreshed {count} cookie(s) → {}", path.display()),
+                        "✔ accounts using this profile need no changes".to_string(),
+                    ]),
+                    Ok(cookies::Refresh::ManualImportRequired) => notice(&[
+                        "ℹ This profile was imported manually — it has no browser to re-capture from."
+                            .to_string(),
+                        "  Re-export with 'Get cookies.txt LOCALLY' while logged in, then use"
+                            .to_string(),
+                        "  Import profile → From file / Paste.".to_string(),
+                    ]),
+                    Err(e) => notice(&[
+                        format!("✖ refresh failed: {e}"),
+                        "  tip: is the browser closed? Try again, or re-create with Create profile"
+                            .to_string(),
+                    ]),
                 }
             }
             "Delete profile" => {
@@ -496,17 +509,26 @@ fn profile_detail_menu(name: &str) {
                 )
                 .value()
                 .unwrap_or(false);
-                if ok {
-                    match cookies::delete_profile(name) {
-                        Ok(true) => {
-                            println!("✔ deleted");
-                            std::thread::sleep(std::time::Duration::from_millis(800));
-                            return;
-                        }
-                        _ => {
-                            println!("✖ not found");
-                            std::thread::sleep(std::time::Duration::from_millis(800));
-                        }
+                if !ok {
+                    // Previously nothing was printed here and the menu simply
+                    // redrew, so declining a destructive action looked exactly
+                    // like the button being dead.
+                    notice(&[format!("kept '{name}' — nothing was deleted")]);
+                    continue;
+                }
+                match cookies::delete_profile(name) {
+                    Ok(true) => {
+                        notice(&[format!("✔ deleted '{name}'")]);
+                        return;
+                    }
+                    Ok(false) => {
+                        notice(&[
+                            format!("✖ '{name}' no longer exists"),
+                            "  it may have been deleted from another screen".to_string(),
+                        ]);
+                    }
+                    Err(e) => {
+                        notice(&[format!("✖ delete failed: {e}")]);
                     }
                 }
             }
@@ -579,22 +601,23 @@ fn import_from_file_flow(default_name: &str) {
     let content = match std::fs::read_to_string(&src_expanded) {
         Ok(c) => c,
         Err(e) => {
-            println!("✖ cannot read {}: {e}", src_expanded.display());
-            std::thread::sleep(std::time::Duration::from_millis(1500));
+            notice_in(
+                "Cookie profiles",
+                &[format!("✖ cannot read {}: {e}", src_expanded.display())],
+            );
             return;
         }
     };
     match cookies::save_profile(&name, &content) {
         Ok(path) => {
             let count = cookies::load_profile(&name).map(|v| v.len()).unwrap_or(0);
-            println!("✔ imported {count} cookie(s) → {}", path.display());
+            notice(&[format!("✔ imported {count} cookie(s) → {}", path.display())]);
         }
-        Err(e) => {
-            println!("✖ invalid cookies file: {e}");
-            println!("  Expected Netscape format (7 tab-separated fields).");
-        }
+        Err(e) => notice(&[
+            format!("✖ invalid cookies file: {e}"),
+            "  Expected Netscape format (7 tab-separated fields).".to_string(),
+        ]),
     }
-    std::thread::sleep(std::time::Duration::from_millis(1800));
 }
 
 fn import_from_paste_flow(default_name: &str) {
@@ -629,10 +652,12 @@ fn import_from_paste_flow(default_name: &str) {
     }
     edit_with_editor(&path);
     match cookies::load_profile(&name) {
-        Ok(list) => println!("✔ saved {} cookie(s)", list.len()),
-        Err(e) => println!("✖ invalid profile ({e}) — delete or fix {path:?}"),
+        Ok(list) => notice_in("Profiles", &[format!("✔ saved {} cookie(s)", list.len())]),
+        Err(e) => notice_in(
+            "Profiles",
+            &[format!("✖ invalid profile ({e}) — delete or fix {path:?}")],
+        ),
     }
-    std::thread::sleep(std::time::Duration::from_millis(1800));
 }
 
 pub(super) fn site_submenu(name: &str, dir: &Path) {
@@ -667,7 +692,7 @@ pub(super) fn site_submenu(name: &str, dir: &Path) {
             .unwrap_or(false)
             {
                 let _ = std::fs::remove_file(&path);
-                println!("✔ Deleted {name}");
+                notice_in("Sites", &[format!("✔ Deleted {name}")]);
                 return;
             }
         } else {
@@ -790,9 +815,9 @@ pub(super) fn manage_profiles() {
             // Guided account creation — TOML pre-filled with real values
             let profile = prompt_new_profile_accounts(&name);
             match crate::config::write_profile_file(&path, &profile) {
-                Ok(()) => println!("✔ Created {}", path.display()),
+                Ok(()) => notice_in("Profiles", &[format!("✔ Created {}", path.display())]),
                 Err(e) => {
-                    eprintln!("error: write profile: {e}");
+                    notice_in("Profiles", &[format!("✖ write profile: {e}")]);
                     continue;
                 }
             }

@@ -441,7 +441,8 @@ mod tests {
         );
         assert_eq!(
             content_options("tiktok"),
-            // Stories hidden — gallery-dl v1.32.9 upstream limitation
+            // Stories hidden — gallery-dl upstream limitation, not fixed by the
+            // 1.32.9 -> 1.32.16 bump (TiktokStoriesExtractor unchanged)
             vec!["All", "Videos", "Photos", "Profile"]
         );
         assert_eq!(content_options("twitter"), vec!["All", "Media", "Profile"]);

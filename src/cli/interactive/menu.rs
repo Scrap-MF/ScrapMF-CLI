@@ -83,12 +83,21 @@ fn chrome_title(context: &str) -> String {
 /// border title, e.g. "Download content" → `╭ SCRAPMF v1.7.0 ─ Download content ─╮`.
 /// Returns the picked index, `Back` on Esc/q and `Cancel` on Ctrl+C.
 pub fn pick_single(context: &str, options: Vec<(String, Vec<String>)>) -> Step<usize> {
-    pick_single_inner(context, options, false, None)
+    pick_single_inner(context, Vec::new(), options, false, None)
+}
+
+/// As [`pick_single`], but with lines rendered above the options.
+pub fn pick_single_details(
+    context: &str,
+    details: Vec<String>,
+    options: Vec<(String, Vec<String>)>,
+) -> Step<usize> {
+    pick_single_inner(context, details, options, false, None)
 }
 
 /// As [`pick_single`], but advertises that Esc steps back.
 pub fn pick_single_back(context: &str, options: Vec<(String, Vec<String>)>) -> Step<usize> {
-    pick_single_inner(context, options, true, None)
+    pick_single_inner(context, Vec::new(), options, true, None)
 }
 
 /// As [`pick_single_back`], but with the cursor starting on `initial`.
@@ -101,11 +110,12 @@ pub fn pick_single_back_at(
     options: Vec<(String, Vec<String>)>,
     initial: usize,
 ) -> Step<usize> {
-    pick_single_inner(context, options, true, Some(initial))
+    pick_single_inner(context, Vec::new(), options, true, Some(initial))
 }
 
 fn pick_single_inner(
     context: &str,
+    details: Vec<String>,
     options: Vec<(String, Vec<String>)>,
     back: bool,
     cursor: Option<usize>,
@@ -114,15 +124,15 @@ fn pick_single_inner(
         return Step::Cancel;
     }
     let title = chrome_title(context);
-    let mut b = Browser::new(title).mode(Mode::Single);
+    let mut b = Browser::new(title).header(details).mode(Mode::Single);
     if let Some(i) = cursor {
         b = b.cursor_at(i);
     }
     if back {
         b = b.hint(key_hint(true));
     }
-    for (label, details) in options {
-        b = b.entry(label, details);
+    for (label, entry_details) in options {
+        b = b.entry(label, entry_details);
     }
     match b.run() {
         Outcome::Picked(i) => Step::Value(i),
@@ -245,14 +255,21 @@ fn draw_boxed(
 /// What a key press means on a yes/no question.
 ///
 /// Split out from the event loop so every case is testable without a TTY, the
-/// same reasoning that `browser::outcome_for` follows. `None` means the key is
-/// not an answer and the question stays open — important for destructive
-/// prompts, where a stray key must never be read as consent.
-fn confirm_key(key: crossterm::event::KeyCode, destructive: bool) -> Option<Step<bool>> {
+/// same reasoning that `browser::outcome_for` follows.
+///
+/// `None` means the key is not an answer and the question stays open.
+///
+/// Enter always confirms and Esc always steps back, on both kinds of question.
+/// That is the flow the rest of the app already teaches: Enter proceeds, Esc
+/// retreats. A destructive prompt used to invert Enter to "no" on the theory
+/// that a stray keypress could delete a profile — but the box is modal, so the
+/// user had already chosen "Delete profile" from the menu before the prompt
+/// appeared, and the inversion only made the key that confirms every other
+/// action silently refuse this one.
+fn confirm_key(key: crossterm::event::KeyCode) -> Option<Step<bool>> {
     use crossterm::event::KeyCode;
     match key {
-        // Enter takes the safe path: yes normally, no when destructive.
-        KeyCode::Enter => Some(Step::Value(!destructive)),
+        KeyCode::Enter => Some(Step::Value(true)),
         KeyCode::Char('y' | 'Y') => Some(Step::Value(true)),
         // `n` answers no on both kinds of question. On an ordinary question it
         // is the only way to say no at all — dropping it in favour of Enter
@@ -266,12 +283,13 @@ fn confirm_key(key: crossterm::event::KeyCode, destructive: bool) -> Option<Step
 
 /// Ask a yes/no question inside the app's chrome.
 ///
-/// `Enter` confirms: for an ordinary question that means yes, which keeps the
-/// common path to a single keystroke. A `destructive` question is the exception
-/// — `Enter` means *no* there, and confirming needs an explicit `y`, so a
-/// stray Enter cannot delete a profile or a site file.
+/// `Enter` confirms and `Esc` steps back, on every question. The `destructive`
+/// flag no longer changes the key mapping — it only adds "yes" to the hint so
+/// a prompt that removes something reads differently from one that adds.
 ///
-/// `Esc` steps back, matching every other prompt.
+/// The prompt is modal: the caller reached it by already choosing the
+/// destructive action, so Enter confirms an intent the user has expressed
+/// rather than completing a stray keystroke.
 pub fn confirm_back(context: &str, prompt: &str, default: bool, destructive: bool) -> Step<bool> {
     confirm_box(context, prompt, &[], default, destructive)
 }
@@ -288,8 +306,10 @@ pub fn confirm_box(
     use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 
     let help = if destructive {
-        // Enter always answers "no" here, so the hint spells out `y`.
-        "⏎ no · y yes · n no · esc back"
+        // Enter confirms everywhere in this app, and Esc is the way back, so
+        // the hint says exactly that. Marking Enter as "no" here was the
+        // opposite of what every other prompt does.
+        "⏎ yes · esc back"
     } else {
         "⏎ yes · n no · esc back"
     };
@@ -343,12 +363,87 @@ pub fn confirm_box(
             // `boxed` owns the guard; dropping it here restores the terminal.
             return Step::Cancel;
         }
-        let Some(result) = confirm_key(key.code, destructive) else {
+        let Some(result) = confirm_key(key.code) else {
             continue;
         };
         return result;
     }
     Step::Cancel
+}
+
+/// Show a result inside the Browser chrome and wait for acknowledgement.
+///
+/// Every menu in this app draws through `Browser` or [`BoxedPrompt`], both of
+/// which render on the alternate screen. A `println!` issued between two menus
+/// therefore lands on the normal buffer and is covered the moment the next box
+/// is drawn — so an action that had already succeeded looked like it had done
+/// nothing. That is the whole reason a delete reported nothing back.
+///
+/// Lines are coloured by leading marker, matching the log panel: `✔` green,
+/// `✖` red, `ℹ`/`⚠` yellow. Anything else is plain.
+///
+/// Returns `Back` on Esc, `Cancel` on Ctrl+C, so a caller can tell "dismissed"
+/// from "left".
+pub fn notice(context: &str, lines: &[String]) -> Step<()> {
+    use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+
+    let mut boxed = match BoxedPrompt::enter(context) {
+        Ok(b) => b,
+        // No TTY: fall back to plain lines so scripted runs still see them.
+        Err(_) => {
+            for line in lines {
+                println!("{line}");
+            }
+            return Step::Value(());
+        }
+    };
+    let BoxedPrompt {
+        title,
+        terminal,
+        guard: _guard,
+    } = &mut boxed;
+
+    loop {
+        let body: Vec<ratatui::text::Line<'_>> = lines
+            .iter()
+            .map(|line| {
+                use ratatui::style::{Color, Style};
+                let style = if line.trim_start().starts_with('✔') {
+                    Style::default().fg(Color::Green)
+                } else if line.trim_start().starts_with('✖') {
+                    Style::default().fg(Color::Red)
+                } else if line.trim_start().starts_with(['ℹ', '⚠']) {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
+                ratatui::text::Line::styled(line.clone(), style)
+            })
+            .collect();
+        if draw_boxed(title, terminal, body, "⏎ or esc dismiss").is_err() {
+            break;
+        }
+        if !crossterm::event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
+            continue;
+        }
+        let Ok(Event::Key(key)) = crossterm::event::read() else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        if matches!(key.code, KeyCode::Char('c' | 'C'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            return Step::Cancel;
+        }
+        match key.code {
+            KeyCode::Enter | KeyCode::Char(' ' | 'q') => return Step::Value(()),
+            KeyCode::Esc => return Step::Back,
+            _ => {}
+        }
+    }
+    Step::Value(())
 }
 
 /// Convenience for simple string options without details pane.
@@ -634,46 +729,34 @@ mod tests {
     #[test]
     fn enter_confirms_yes_for_an_ordinary_question() {
         assert_eq!(
-            confirm_key(crossterm::event::KeyCode::Enter, false),
+            confirm_key(crossterm::event::KeyCode::Enter),
             Some(Step::Value(true))
         );
     }
 
-    /// A stray Enter must never delete anything: destructive questions read
-    /// Enter as "no" and require an explicit `y`.
+    /// Enter confirms a deletion too. The prompt is modal — the user already
+    /// picked "Delete profile" to get here — so Enter carries an intent
+    /// already expressed rather than completing a stray keystroke. Inverting
+    /// it made the key that confirms every other action refuse this one.
     #[test]
-    fn enter_cancels_a_destructive_question() {
+    fn enter_confirms_a_destructive_question() {
         assert_eq!(
-            confirm_key(crossterm::event::KeyCode::Enter, true),
-            Some(Step::Value(false))
-        );
-    }
-
-    #[test]
-    fn destructive_questions_still_allow_an_explicit_yes() {
-        // `y` is the only way to say yes to a deletion.
-        assert_eq!(
-            confirm_key(KeyCode::Char('y'), true),
-            Some(Step::Value(true))
-        );
-        assert_eq!(
-            confirm_key(KeyCode::Char('Y'), true),
+            confirm_key(crossterm::event::KeyCode::Enter),
             Some(Step::Value(true))
         );
     }
 
     #[test]
-    fn n_is_an_escape_from_a_destructive_question() {
-        assert_eq!(
-            confirm_key(KeyCode::Char('n'), true),
-            Some(Step::Value(false))
-        );
+    fn letters_remain_valid_answers() {
+        assert_eq!(confirm_key(KeyCode::Char('y')), Some(Step::Value(true)));
+        assert_eq!(confirm_key(KeyCode::Char('Y')), Some(Step::Value(true)));
+        assert_eq!(confirm_key(KeyCode::Char('n')), Some(Step::Value(false)));
+        assert_eq!(confirm_key(KeyCode::Char('N')), Some(Step::Value(false)));
     }
 
     #[test]
     fn esc_steps_back_rather_than_answering() {
-        assert_eq!(confirm_key(KeyCode::Esc, false), Some(Step::Back));
-        assert_eq!(confirm_key(KeyCode::Esc, true), Some(Step::Back));
+        assert_eq!(confirm_key(KeyCode::Esc), Some(Step::Back));
     }
 
     /// Keys that mean nothing here must not answer the question — otherwise a
@@ -697,25 +780,16 @@ mod tests {
         // often "no" needs a way to say so that is not Esc — Esc means "step
         // back" everywhere else, and a caller that maps it to `false` is
         // leaning on a side effect rather than a designed answer.
-        assert_eq!(
-            confirm_key(KeyCode::Char('n'), false),
-            Some(Step::Value(false))
-        );
-        assert_eq!(
-            confirm_key(KeyCode::Char('N'), false),
-            Some(Step::Value(false))
-        );
-        assert_eq!(
-            confirm_key(KeyCode::Char('y'), false),
-            Some(Step::Value(true))
-        );
+        assert_eq!(confirm_key(KeyCode::Char('n')), Some(Step::Value(false)));
+        assert_eq!(confirm_key(KeyCode::Char('N')), Some(Step::Value(false)));
+        assert_eq!(confirm_key(KeyCode::Char('y')), Some(Step::Value(true)));
     }
 
     #[test]
     fn unrelated_keys_are_ignored() {
-        assert_eq!(confirm_key(KeyCode::Char('x'), true), None);
-        assert_eq!(confirm_key(KeyCode::Left, false), None);
-        assert_eq!(confirm_key(KeyCode::Tab, true), None);
+        assert_eq!(confirm_key(KeyCode::Char('x')), None);
+        assert_eq!(confirm_key(KeyCode::Left), None);
+        assert_eq!(confirm_key(KeyCode::Tab), None);
     }
 
     #[test]

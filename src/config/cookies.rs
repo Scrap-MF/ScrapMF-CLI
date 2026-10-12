@@ -29,6 +29,12 @@ pub fn cookies_dir() -> Option<PathBuf> {
         .map(|base| base.join("cookies"))
 }
 
+/// Prefix of the profile scrapmf writes itself when it captures a browser
+/// session for a scrape. It lives in the cookies directory because that is
+/// what `--cookies` expects, but it is a cache and not a user profile: it is
+/// hidden from [`list_profiles`] and replaced on each capture.
+pub const AUTO_PROFILE_PREFIX: &str = "scrapmf-auto-";
+
 fn sanitize_name(name: &str) -> String {
     crate::util::sanitize_component(name.trim(), 48, "unnamed")
 }
@@ -52,6 +58,12 @@ pub fn list_profiles() -> Vec<String> {
                 .file_stem()
                 .and_then(|s| s.to_str().map(String::from))
         })
+        // `scrapmf-auto-*` is the internal capture cache written by the
+        // browser-cookie resolution, not something the user created. Listing it
+        // in Browse profiles made it look like a saved profile the user had to
+        // manage — and deleting it changed nothing, because the next scrape
+        // rewrote it.
+        .filter(|n| !n.starts_with(AUTO_PROFILE_PREFIX))
         .collect();
     names.sort();
     names
@@ -212,10 +224,21 @@ pub fn save_profile(name: &str, netscape_content: &str) -> Result<PathBuf, Strin
     Ok(path)
 }
 
+/// Delete a stored profile.
+///
+/// `Ok(true)` means the file was removed, `Ok(false)` that there was nothing to
+/// remove. The two are distinct on purpose: the UI reports them differently,
+/// because "already gone" usually means another screen moved underneath this
+/// one, while `Err` is a real failure such as a permission problem on the
+/// directory.
 pub fn delete_profile(name: &str) -> Result<bool, String> {
     let path = profile_path(name).ok_or("invalid profile name")?;
+    delete_profile_at(&path)
+}
+
+fn delete_profile_at(path: &Path) -> Result<bool, String> {
     if path.exists() {
-        std::fs::remove_file(&path).map_err(|e| format!("delete profile: {e}"))?;
+        std::fs::remove_file(path).map_err(|e| format!("delete profile: {e}"))?;
         Ok(true)
     } else {
         Ok(false)
@@ -1257,6 +1280,103 @@ mod tests {
     const SAMPLE: &str = "# Netscape HTTP Cookie File\n\
 .instagram.com\tTRUE\t/\tTRUE\t4102444800\tsessionid\tabc123\n\
 .tiktok.com\tTRUE\t/\tTRUE\t0\tweb_session\txyz\n";
+
+    // ─── Profile deletion ────────────────────────────────────────────────────
+
+    /// Deleting is the only operation here that destroys user data, and it had
+    /// no coverage at all. A regression here loses cookie profiles silently.
+    #[test]
+    fn delete_removes_the_file_and_reports_it() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("Instagram_reggi.txt");
+        std::fs::write(&path, SAMPLE).expect("write");
+        assert!(
+            delete_profile_at(&path).expect("delete"),
+            "an existing profile must report that it was deleted"
+        );
+        assert!(!path.exists(), "the file must be gone");
+    }
+
+    /// "Nothing to delete" is not a failure: the UI says so differently, and a
+    /// second delete of the same profile must not look like an error.
+    #[test]
+    fn delete_of_a_missing_profile_is_not_an_error() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("never-existed.txt");
+        assert!(
+            !delete_profile_at(&path).expect("delete"),
+            "a missing profile must report false, not fail"
+        );
+    }
+
+    #[test]
+    fn delete_reports_the_real_error_instead_of_swallowing_it() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let sub = dir.path().join("not-a-dir");
+        std::fs::create_dir(&sub).expect("mkdir");
+        // A directory where a file is expected: remove_file fails and that
+        // must surface as Err, not as a quiet Ok(false).
+        assert!(
+            delete_profile_at(&sub).is_err(),
+            "a real I/O failure must not be reported as 'nothing to delete'"
+        );
+    }
+
+    // ─── Profile naming ──────────────────────────────────────────────────────
+
+    /// `list_profiles` returns file stems and `profile_path` sanitizes the
+    /// name it is given. If that round-trip is lossy the UI can show a name
+    /// that no longer resolves to the file, and delete then fails silently —
+    /// which is exactly the "the button does nothing" symptom.
+    #[test]
+    fn profile_name_survives_the_path_round_trip() {
+        for name in [
+            "Instagram_reggi",
+            "brave-instagram",
+            "aura_putrefakta",
+            "scrapmf-auto-brave",
+        ] {
+            let path = profile_path(name).expect("path");
+            let stem = path
+                .file_stem()
+                .expect("stem")
+                .to_string_lossy()
+                .to_string();
+            assert_eq!(
+                stem,
+                sanitize_name(name),
+                "the stem must match what a lookup sanitises to"
+            );
+            assert_eq!(
+                profile_path(&stem).map(|p| p.file_stem().unwrap().to_string_lossy().to_string()),
+                Some(stem.clone()),
+                "sanitising an already-listed name must be idempotent"
+            );
+        }
+    }
+
+    #[test]
+    fn names_with_spaces_collapse_to_a_stable_filename() {
+        assert_eq!(sanitize_name("Instagram Reggi"), "Instagram_Reggi");
+        assert_eq!(
+            sanitize_name("  Instagram Reggi  "),
+            "Instagram_Reggi",
+            "surrounding whitespace must not change the target file"
+        );
+        assert_eq!(sanitize_name(""), "unnamed");
+    }
+
+    /// The auto-capture cache lives in the same directory but is not a user
+    /// profile: it must not appear in Browse profiles, or the user is shown a
+    /// row that regenerates itself the moment they touch it.
+    #[test]
+    fn auto_capture_profiles_are_hidden_from_the_user_listing() {
+        assert!(AUTO_PROFILE_PREFIX.starts_with("scrapmf-auto"));
+        assert!(
+            format!("{AUTO_PROFILE_PREFIX}brave").starts_with(AUTO_PROFILE_PREFIX),
+            "the generated name must carry the prefix the listing filters on"
+        );
+    }
 
     #[test]
     fn parses_valid_netscape() {

@@ -915,10 +915,13 @@ pub(super) fn auto_match_site_key(
 /// links copied while viewing them, individual post links), auto-match each
 /// against sites/*.toml, and batch-run them.
 ///
-/// Motivation (verified against pinned gallery-dl v1.32.9): TikTok
-/// private-but-followed accounts fail the /@USER/stories LIST path
-/// (profile page statusCode 10222), but their direct /video/<id> story
-/// links extract perfectly — so pasting links is the reliable route.
+/// Motivation (re-verified against gallery-dl v1.32.16, whose
+/// `TiktokStoriesExtractor` and `_check_status_code` are byte-identical to
+/// v1.32.9): TikTok private-but-followed accounts fail the /@USER/stories
+/// LIST path (profile page statusCode 10222), but their direct /video/<id>
+/// story links extract perfectly — so pasting links is the reliable route.
+/// The only TikTok change in the 1.32.9..1.32.16 range randomizes headers to
+/// dodge 403s, which does not move a semantic 10222.
 pub(super) fn prompt_scrape_direct_urls() {
     // Re-ask with the previous text pre-filled: one bad URL in a batch should
     // mean fixing that one, not starting over.
