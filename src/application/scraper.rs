@@ -523,6 +523,14 @@ pub fn scrape_with_hooks(
 }
 
 /// Why a sub-extractor run did not produce downloads.
+///
+/// `non_exhaustive` so that adding a case is not a breaking change. Adding a
+/// variant to a plain `pub enum` forces every downstream match to be edited,
+/// which is exactly the API break `cargo-semver-checks` flagged when
+/// `RateLimited` arrived and release-plz turned a fix release into a major.
+/// This crate is a binary and nothing consumes the enum, but the marker keeps
+/// that a property of the type rather than a fact we have to remember.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureKind {
     /// gallery-dl needs a valid session (cookies expired / private content).
