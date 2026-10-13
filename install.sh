@@ -34,8 +34,11 @@ case "$OS" in
     exit 1
     ;;
   MINGW*|MSYS*|CYGWIN*)
-    echo "✖ Windows: download scrapmf-x86_64-pc-windows-msvc.tar.gz from" >&2
-    echo "  https://github.com/${REPO}/releases and extract scrapmf.exe manually." >&2
+    echo "✖ Windows: this installer covers Linux and macOS." >&2
+    echo "" >&2
+    echo "  Download scrapmf.exe from" >&2
+    echo "  https://github.com/${REPO}/releases/latest" >&2
+    echo "  put it anywhere in your PATH, then run: scrapmf setup" >&2
     exit 1
     ;;
 esac
