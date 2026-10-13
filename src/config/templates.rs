@@ -678,7 +678,7 @@ pub fn ensure_threads_site() -> anyhow::Result<()> {
 /// Ensure sites/facebook.toml exists with 0o600 (no clobber).
 /// Facebook strategy — via gallery-dl (re-verified 1.32.16 via source; the
 /// facebook extractor is byte-identical across 1.32.9..1.32.16).
-/// Separates publicaciones/álbumes/videos/perfil + historias/destacadas (featured)
+/// Separates posts/albums/videos/profile + stories/featured
 /// like instagram:highlights (placeholders until upstream stories/highlights).
 pub fn ensure_facebook_site() -> anyhow::Result<()> {
     let Some(dir) = sites_dir() else {
@@ -750,7 +750,7 @@ pub fn ensure_facebook_site() -> anyhow::Result<()> {
         toml::Value::Table(photos_table),
     );
 
-    // facebook:albums — álbumes (set_id + title)
+    // facebook:albums — albums (set_id + title)
     let mut albums_table = toml::map::Map::new();
     albums_table.insert(
         "include".to_string(),
@@ -865,12 +865,12 @@ pub fn ensure_facebook_site() -> anyhow::Result<()> {
     let header = r#"# scrapmf — site config — facebook
 # File: ~/.config/scrapmf/sites/facebook.toml (0o600, dir 0o700)
 # Gallery-dl 1.32.16 (unchanged from 1.32.9): facebook:user dispatches photos/albums/avatar/info; set/video handle albums/videos.
-# Auth: siempre requiere sesión (c_user/xs) — brave cookies o --cookies file (no anon como vsco).
-# Árbol: PERFIL/facebook/CUENTA/{photos,albums/<title (set)/>,videos,profile}
-#   Publicaciones → photos/ {date}_{id}_{num}.{ext}
-#   Álbumes → albums/{title (set)}/{id}.{ext}
+# Auth: always requires a session (c_user/xs) — brave cookies or --cookies file (no anonymous access, unlike vsco).
+# Tree: PROFILE/facebook/ACCOUNT/{photos,albums/<title (set)/,videos,profile}
+#   Posts → photos/ {date}_{id}_{num}.{ext}
+#   Albums → albums/{title (set)}/{id}.{ext}
 #   Videos → videos/ {date}_{id}.{ext}
-#   Perfil → profile/ {username}_{id}.{ext}
+#   Profile → profile/ {username}_{id}.{ext}
 "#;
     let content = format!("{header}{body}");
     write_config_file(&target, &content)

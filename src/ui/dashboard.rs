@@ -240,9 +240,9 @@ fn draw(
     }
     if finished {
         let (msg, color) = if cancelled {
-            ("⚠ Cancelado — presione Enter para volver", Color::Yellow)
+            ("⚠ Cancelled — press Enter to go back", Color::Yellow)
         } else {
-            ("✔ Completado — presione Enter para volver", Color::Green)
+            ("✔ Done — press Enter to go back", Color::Green)
         };
         lines.push(Line::styled(
             msg,
@@ -312,7 +312,7 @@ fn draw(
 ///
 /// When the user presses Ctrl-C in the dashboard the abort flag is also set.
 /// After the worker returns the dashboard does NOT close: it keeps rendering
-/// a finished state ("Completado") until the user presses Enter (or Ctrl-C),
+/// a finished state ("Done") until the user presses Enter (or Ctrl-C),
 /// so results can be inspected before returning to the menu. While running,
 /// ↑↓ / PgUp / PgDn scroll the log panel (no mouse capture — text selection
 /// stays available).
@@ -371,7 +371,7 @@ where
                     show_logs,
                     snapshot_scroll,
                     render_finished.load(Ordering::Relaxed),
-                    // "Cancelado" only in the finished phase (abort + done)
+                    // "Cancelled" only in the finished phase (abort + done)
                     render_finished.load(Ordering::Relaxed) && render_abort.load(Ordering::Relaxed),
                 );
             });

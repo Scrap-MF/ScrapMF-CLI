@@ -1117,7 +1117,7 @@ pub(crate) fn username_prompt_value(raw: &str) -> String {
 /// whatever was typed before so only the wrong part has to be corrected.
 fn username_prompt(site: &str, initial: &str) -> Option<String> {
     let prompt = if site == "facebook" {
-        "ID o URL del perfil (ej. 123..., https://www.facebook.com/profile.php?id=...):"
+        "Profile ID or URL (e.g. 123..., https://www.facebook.com/profile.php?id=...):"
     } else if site == "instagram" {
         "Username or ID (without @):"
     } else {
@@ -1330,18 +1330,18 @@ pub(super) fn prompt_quick_scrape() {
                     };
                     match res {
                         Ok(u) => {
-                            println!("→ {} → @{} (resuelto)", raw_id, u);
+                            println!("→ {} → @{} (resolved)", raw_id, u);
                             u
                         }
                         Err(e) => {
                             let site_label = if site_name == "facebook" { "FB" } else { "IG" };
                             crate::output::print_error(&format!(
-                                "no se pudo resolver ID a username: {e} — verifica el ID y que la sesión de {site_label} esté vigente"
+                                "could not resolve ID to username: {e} — check the ID and that your {site_label} session is still valid"
                             ));
                             crate::output::print_help(
-                                "nota: el error queda visible hasta que presiones Enter",
+                                "note: the error stays visible until you press Enter",
                             );
-                            let _ = Text::new("Presiona Enter para volver")
+                            let _ = Text::new("Press Enter to go back")
                                 .with_render_config(super::theme::render_config())
                                 .prompt();
                             return;
@@ -1494,7 +1494,7 @@ mod quick_flatten_tests {
 
     #[test]
     fn conditional_table_tiktok_posts_both_branches() {
-        // Estructura idéntica al template de TikTok posts
+        // Structure identical to the TikTok posts template
         let mut dir_table = toml::map::Map::new();
         dir_table.insert(
             "post_type == 'image'".to_string(),
