@@ -162,6 +162,40 @@ jobs:
                                         export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=armv7-unknown-linux-musleabihf-gcc ;;
           esac
           cargo build --release --target ${{ matrix.target }} --locked
+
+      # Regression guard for the Windows CRT. An MSVC exe that links the CRT
+      # dynamically imports VCRUNTIME140.dll, which only exists if the Visual
+      # C++ Redistributable is installed — so "download the exe and run it"
+      # stops being true. .cargo/config.toml pins +crt-static to prevent that;
+      # this step makes sure it actually took effect, because a silently
+      # dropped rustflag would otherwise ship a broken binary again.
+      - name: Verify the exe has no external runtime dependency
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: bash
+        run: |
+          EXE="target/x86_64-pc-windows-msvc/release/scrapmf.exe"
+          if [ ! -f "$EXE" ]; then echo "::error::expected $EXE to exist"; exit 1; fi
+          # dumpbin ships with MSVC on the runner; fall back to objdump, which
+          # Git Bash also provides.
+          if command -v dumpbin >/dev/null 2>&1; then
+            dumpbin /dependents "$EXE" | tr -d '\r'
+          elif command -v objdump >/dev/null 2>&1; then
+            objdump -p "$EXE"
+          else
+            echo "::error::neither dumpbin nor objdump is available to inspect imports"; exit 1
+          fi > imports.txt
+          cat imports.txt
+          # Only DLLs that ship with Windows may remain. Note that msvcrt.dll is
+          # an OS component, but vcruntime140.dll is NOT: it comes from the
+          # Visual C++ Redistributable, which is exactly what this guard exists
+          # to catch — so it is deliberately absent from this list.
+          ALLOWED='^(api-ms-win-|bcryptprimitives|combase|kernel32|ntdll|ole32|oleaut32|shell32|user32|ws2_32|advapi32|crypt32|secur32|shlwapi|msvcrt)'
+          if grep -oiE '[a-z0-9_.-]+\.dll' imports.txt | sort -u | grep -viE "$ALLOWED"; then
+            echo "::error::scrapmf.exe imports a DLL that does not ship with Windows. Add it to ALLOWED here if it is an OS component, or fix +crt-static in .cargo/config.toml."
+            exit 1
+          fi
+          echo "All imported DLLs ship with Windows — the exe is self-contained."
+
       - name: Create archive
         shell: bash
         run: |
