@@ -165,17 +165,32 @@ jobs:
       - name: Create archive
         shell: bash
         run: |
-          BIN=scrapmf
-          case "${{ matrix.target }}" in *windows*) BIN=scrapmf.exe ;; esac
-          tar czf "scrapmf-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" "$BIN"
-          sha256sum "scrapmf-${{ matrix.target }}.tar.gz" > "scrapmf-${{ matrix.target }}.tar.gz.sha256"
+          mkdir -p dist
+          case "${{ matrix.target }}" in
+            *windows*)
+              # Windows gets the exe standalone, because that is what people
+              # actually look for: no extraction step, and a file they can
+              # drop into PATH. The zip is the platform-native container for
+              # anyone who wants the binary as a folder. The tar.gz is kept so
+              # anything already written against the old layout keeps working.
+              cp "target/${{ matrix.target }}/release/scrapmf.exe" dist/scrapmf.exe
+              powershell -NoProfile -Command \
+                "Compress-Archive -Path dist/scrapmf.exe -DestinationPath dist/scrapmf-windows-x86_64.zip -Force"
+              tar czf dist/scrapmf-windows-x86_64.tar.gz -C "target/${{ matrix.target }}/release" scrapmf.exe
+              ;;
+            *)
+              tar czf "dist/scrapmf-${{ matrix.target }}.tar.gz" -C "target/${{ matrix.target }}/release" scrapmf
+              ;;
+          esac
+          # One checksum per artifact. Named individually rather than a single
+          # checksums.txt so the merge-multiple download in the publish job
+          # cannot have two matrix jobs clobber the same file.
+          ( cd dist && for f in *; do sha256sum "$f" > "$f.sha256"; done )
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: scrapmf-${{ matrix.target }}
-          path: |
-            scrapmf-${{ matrix.target }}.tar.gz
-            scrapmf-${{ matrix.target }}.tar.gz.sha256
+          path: dist/
           if-no-files-found: error
 
   # Single writer: one job gathers all archives and creates exactly one
@@ -198,3 +213,31 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          body: |
+            ## Windows
+
+            Download **`scrapmf.exe`** — it runs as-is, no extraction needed.
+            Put it anywhere in your `PATH`, then open a **new** terminal and:
+
+            ```
+            scrapmf --version
+            scrapmf setup
+            scrapmf doctor
+            ```
+
+            `setup` downloads the pinned gallery-dl backend; without it
+            `scrapmf` cannot download anything. Use **Windows Terminal** for
+            the interactive menu.
+
+            `scrapmf-windows-x86_64.zip` contains the same executable if you
+            prefer to keep it in a folder.
+
+            ## Linux / macOS
+
+            ```
+            curl -fsSL https://raw.githubusercontent.com/Scrap-MF/ScrapMF-CLI/main/install.sh | sh
+            ```
+
+            Static musl builds are dependency-free; pick the `.tar.gz`
+            matching your target from the assets below and verify it against
+            the adjacent `.sha256`.

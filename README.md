@@ -49,10 +49,19 @@ cargo install --path .                 # or build from this repo
 
 **Windows:**
 
-Download `scrapmf-x86_64-pc-windows-msvc.tar.gz` from the
-[releases page](https://github.com/Scrap-MF/ScrapMF-CLI/releases), extract it,
-and put `scrapmf.exe` somewhere in your `PATH`. Use **Windows Terminal** for the
-menu — legacy conhost renders it poorly.
+Download **`scrapmf.exe`** from the
+[latest release](https://github.com/Scrap-MF/ScrapMF-CLI/releases/latest) — it
+runs as-is, no extraction step. Put it anywhere in your `PATH`, open a **new**
+terminal, then:
+
+```powershell
+scrapmf --version
+scrapmf setup      # downloads the pinned gallery-dl backend — required
+scrapmf doctor     # confirms both are ready
+```
+
+Use **Windows Terminal** for the menu — legacy conhost renders it poorly.
+`scrapmf-windows-x86_64.zip` holds the same executable if you prefer a folder.
 
 <details>
 <summary><strong>Termux (Android)</strong></summary>
