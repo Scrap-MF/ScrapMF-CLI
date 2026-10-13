@@ -32,3 +32,17 @@ publish = false
 # "next version 1.0.0 / already up-to-date" no matter how many feat/fix
 # commits landed. With git_only it reads tag `v1.0.0` and bumps correctly.
 git_only = true
+# Stop cargo-semver-checks from forcing major bumps on internal changes.
+#
+# release-plz defaults to running the API check whenever the package looks
+# like a library, and scrapmf has no explicit [lib] section, so it qualified.
+# That check compares the *public Rust API* between releases, and it does not
+# know nobody imports this crate: `publish = false`, crates.io is off, the
+# artifact is a binary. Adding a variant to a `pub enum FailureKind` was
+# enough to turn a fix release into 2.0.0 — a change that would never reach a
+# single consumer.
+#
+# Without this, version follows Conventional Commits: feat -> minor,
+# fix -> patch. If scrapmf is ever published as a library that others depend
+# on, delete this line and the semver guarantee comes back with it.
+semver_check = false
