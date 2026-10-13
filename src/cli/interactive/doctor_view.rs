@@ -78,10 +78,7 @@ pub(crate) fn show() {
                     .title(" Doctor "),
             );
             f.render_widget(block, chunks[0]);
-            f.render_widget(
-                Paragraph::new("Enter para volver · q/Esc Cancelar"),
-                chunks[1],
-            );
+            f.render_widget(Paragraph::new("Enter to go back · q/Esc Cancel"), chunks[1]);
         });
 
         let has_event =
