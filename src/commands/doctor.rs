@@ -20,6 +20,103 @@ pub struct CheckLine {
     pub text: String,
 }
 
+/// Report on every `sites/*.toml`.
+///
+/// Nothing else in the program looks at these after they are written. A file
+/// the user edited into an unparseable state is skipped by every migration
+/// (rebuilding it from defaults would erase it) and then quietly ignored, so
+/// the downloads that depend on it fail with no explanation anywhere. This is
+/// the only place that surfaces it.
+///
+/// A site file that will not parse is also the one input that could once take
+/// the user's settings with it, so the parse error is shown verbatim: the
+/// common causes are a type typo in `[rate_limit]` (`sleep = 3` where a string
+/// is expected) and a missing quote.
+fn check_site_configs(ok: &mut bool) -> Vec<CheckLine> {
+    let Some(dir) = config::sites_dir() else {
+        return Vec::new();
+    };
+    site_configs_in(&dir, ok)
+}
+
+fn site_configs_in(dir: &std::path::Path, ok: &mut bool) -> Vec<CheckLine> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    let mut files: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+        .collect();
+    files.sort();
+
+    let mut broken = 0usize;
+    for path in &files {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        match std::fs::read_to_string(path) {
+            Err(e) => {
+                out.push(CheckLine {
+                    level: Level::Error,
+                    text: format!("sites/{name} — cannot read: {e}"),
+                });
+                *ok = false;
+                broken += 1;
+            }
+            Ok(raw) => match toml::from_str::<config::Site>(&raw) {
+                Err(e) => {
+                    out.push(CheckLine {
+                        level: Level::Error,
+                        text: format!("sites/{name} — does not parse: {e}"),
+                    });
+                    out.push(CheckLine {
+                        level: Level::Help,
+                        text: "    fix the line above, or delete the file to regenerate it"
+                            .to_string(),
+                    });
+                    *ok = false;
+                    broken += 1;
+                }
+                Ok(site)
+                    if site.site.is_none()
+                        && site.pattern.is_none()
+                        && site.extractor.is_empty() =>
+                {
+                    out.push(CheckLine {
+                        level: Level::Error,
+                        text: format!(
+                            "sites/{name} — empty or identity-less (no site/pattern/extractor)"
+                        ),
+                    });
+                    out.push(CheckLine {
+                        level: Level::Help,
+                        text: "    delete the file to regenerate it".to_string(),
+                    });
+                    *ok = false;
+                    broken += 1;
+                }
+                Ok(_) => {}
+            },
+        }
+    }
+
+    if files.is_empty() {
+        out.push(CheckLine {
+            level: Level::Warn,
+            text: format!("No site configs found in {}", dir.display()),
+        });
+    } else if broken == 0 {
+        out.push(CheckLine {
+            level: Level::Success,
+            text: format!("Site configs: {} file(s) OK", files.len()),
+        });
+    }
+    out
+}
+
 /// Collect all checks as structured lines (used by both CLI and TUI).
 pub fn collect(verbose: u8) -> (Vec<CheckLine>, bool) {
     let mut out: Vec<CheckLine> = Vec::new();
@@ -272,6 +369,8 @@ pub fn collect(verbose: u8) -> (Vec<CheckLine>, bool) {
         }
     }
 
+    out.extend(check_site_configs(&mut ok));
+
     if ok {
         out.push(CheckLine {
             level: Level::Success,
@@ -305,5 +404,118 @@ pub fn run(verbose: u8) -> Result<()> {
         Err(anyhow::anyhow!(
             "some doctor checks failed (see details above)"
         ))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod site_config_tests {
+    use super::{Level, site_configs_in};
+
+    fn seed(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        for (name, body) in files {
+            std::fs::write(dir.path().join(name), body).expect("seed");
+        }
+        dir
+    }
+
+    fn texts(lines: &[super::CheckLine]) -> String {
+        lines
+            .iter()
+            .map(|l| format!("{:?}: {}", l.level, l.text))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn healthy_site_configs_pass() {
+        let dir = seed(&[
+            ("instagram.toml", "site = \"instagram\"\n"),
+            (
+                "vsco.toml",
+                "site = \"vsco\"\nextractor = { \"vsco:gallery\" = {} }\n",
+            ),
+        ]);
+        let mut ok = true;
+        let lines = site_configs_in(dir.path(), &mut ok);
+
+        assert!(ok, "healthy configs must not fail:\n{}", texts(&lines));
+        assert_eq!(
+            lines.iter().filter(|l| l.level == Level::Success).count(),
+            1,
+            "expected one summary line:\n{}",
+            texts(&lines)
+        );
+    }
+
+    /// The whole reason this check exists: a file the user broke by hand used
+    /// to be invisible. This is the exact shape that used to destroy a config
+    /// — `[rate_limit] sleep = 3` where the field is a String.
+    #[test]
+    fn unparseable_site_config_is_reported_and_fails() {
+        let dir = seed(&[(
+            "instagram.toml",
+            "site = \"instagram\"\n\n[rate_limit]\nsleep = 3\n\n[extractor]\n",
+        )]);
+        let mut ok = true;
+        let lines = site_configs_in(dir.path(), &mut ok);
+
+        assert!(!ok, "a broken site config must fail the check");
+        let out = texts(&lines);
+        assert!(
+            out.contains("instagram.toml") && out.contains("does not parse"),
+            "must name the file and the problem:\n{out}"
+        );
+    }
+
+    #[test]
+    fn identity_less_site_config_is_reported() {
+        // Parses cleanly, but site/pattern/extractor are all absent — the
+        // shape a truncated or hand-stubbed file ends up in.
+        let dir = seed(&[("instagram.toml", "extra_args = []\n")]);
+        let mut ok = true;
+        let lines = site_configs_in(dir.path(), &mut ok);
+
+        assert!(!ok, "identity-less config must fail the check");
+        assert!(
+            texts(&lines).contains("identity-less"),
+            "unexpected output:\n{}",
+            texts(&lines)
+        );
+    }
+
+    #[test]
+    fn empty_dir_warns_without_failing() {
+        let dir = seed(&[]);
+        let mut ok = true;
+        let lines = site_configs_in(dir.path(), &mut ok);
+
+        assert!(ok, "no site configs is not a failure");
+        assert!(
+            texts(&lines).contains("No site configs"),
+            "unexpected output:\n{}",
+            texts(&lines)
+        );
+    }
+
+    /// One broken file among healthy ones: both must be visible, and the
+    /// summary must not claim everything is fine.
+    #[test]
+    fn one_broken_file_does_not_hide_the_healthy_ones() {
+        let dir = seed(&[
+            ("instagram.toml", "site = \"instagram\"\n"),
+            ("tiktok.toml", "site = 42\n"),
+        ]);
+        let mut ok = true;
+        let lines = site_configs_in(dir.path(), &mut ok);
+
+        assert!(!ok);
+        let out = texts(&lines);
+        assert!(out.contains("tiktok.toml"), "broken file must be named");
+        assert!(
+            !out.contains("Site configs:"),
+            "must not claim success while a file is broken:\n{out}"
+        );
     }
 }
