@@ -532,6 +532,14 @@ pub(super) fn preview_and_execute(requests: Vec<ScrapeJob>, cfg: &config::Config
         // dashboard closes: the alternate screen cannot be copied from, and
         // previously failed jobs vanished with it (regression fixed here).
         let mut job_reports: Vec<Vec<(bool, String)>> = Vec::with_capacity(requests.len());
+        // Paths gallery-dl reported downloading, per job, for the post-run
+        // integrity check. The interactive path never ran one, so truncated
+        // videos and stray .part files were invisible here — the one place a
+        // user is most likely to look after a run.
+        let downloaded_by_job: Vec<Arc<std::sync::Mutex<Vec<String>>>> = requests
+            .iter()
+            .map(|_| Arc::new(std::sync::Mutex::new(Vec::new())))
+            .collect();
 
         crate::ui::run_dashboard(state.clone(), abort.clone(), true, || {
             for (i, (req, site, username, _desc)) in requests.iter().enumerate() {
@@ -564,8 +572,13 @@ pub(super) fn preview_and_execute(requests: Vec<ScrapeJob>, cfg: &config::Config
                     on_file: Box::new({
                         let st = state.clone();
                         let rl = runlog.clone();
+                        let paths = downloaded_by_job[i].clone();
                         move |path: &str| {
                             rl.borrow_mut().line(path);
+                            paths
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .push(path.to_string());
                             let mut st = st.lock().unwrap_or_else(|p| p.into_inner());
                             st.add_file(i);
                             // Log panel reassurance: show the downloaded file
@@ -622,6 +635,27 @@ pub(super) fn preview_and_execute(requests: Vec<ScrapeJob>, cfg: &config::Config
                 let lines = format_job_outcome(&result, site, username);
                 let log_path = runlog.borrow().path.display().to_string();
                 drop(runlog);
+                let mut rep = lines;
+                // Post-run integrity: only meaningful when the scrape actually
+                // succeeded, and never on a cancelled run — a half-finished
+                // download would report every remaining file as truncated.
+                if result.is_ok() && !was_cancelled {
+                    let paths = downloaded_by_job[i]
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .clone();
+                    let out_dir = crate::config::expand_output_dir(
+                        req.output.as_ref().unwrap_or(&cfg.general.output_dir),
+                    );
+                    let (checked, issues) =
+                        crate::application::integrity::verify_run(&paths, Some(&out_dir));
+                    if let Some(summary) = crate::application::integrity::quality_summary(&paths) {
+                        rep.push((false, format!("quality: {summary}")));
+                    }
+                    for (error, text) in integrity_report_lines(checked, &issues) {
+                        rep.push((error, text));
+                    }
+                }
                 // Termux MediaScan — single dir scan per finished download (quick/saved/url)
                 if result.is_ok() {
                     let dir = crate::config::expand_output_dir(
@@ -629,7 +663,6 @@ pub(super) fn preview_and_execute(requests: Vec<ScrapeJob>, cfg: &config::Config
                     );
                     crate::application::media_scan::maybe_scan(&dir);
                 }
-                let mut rep = lines;
                 if failed && !log_path.is_empty() {
                     rep.push((true, format!("log: {log_path}")));
                 }
@@ -675,6 +708,90 @@ pub(super) fn preview_and_execute(requests: Vec<ScrapeJob>, cfg: &config::Config
         }
     }
     Step::Value(())
+}
+
+/// Render the integrity report as `(to_stderr, text)` lines.
+///
+/// Mirrors the grouping used by the CLI path: an HEVC video is a complete
+/// download that this toolchain will not play, so it must not inherit the
+/// "delete and re-run" advice. A file that could not be read is a third case —
+/// completeness is simply unknown.
+///
+/// Returns an empty vec when there is nothing to say.
+pub(super) fn integrity_report_lines(
+    checked: usize,
+    issues: &[(
+        std::path::PathBuf,
+        crate::application::integrity::IntegrityIssue,
+    )],
+) -> Vec<(bool, String)> {
+    if issues.is_empty() {
+        if checked > 0 {
+            tracing::debug!(checked, "integrity check: all files OK");
+        }
+        return Vec::new();
+    }
+    let (delete, leave, unknown) = crate::application::integrity::partition_by_remedy(issues);
+    let mut out = Vec::new();
+
+    if !delete.is_empty() {
+        out.push((true, format!("{} file(s) look incomplete:", delete.len())));
+        for (path, issue) in &delete {
+            out.push((
+                true,
+                format!("    - {} ({})", path.display(), issue.description()),
+            ));
+        }
+        out.push((
+            true,
+            "    ↳ delete the file(s) above and re-run — deterministic filenames \
+             re-download only what is missing"
+                .to_string(),
+        ));
+    }
+
+    if !leave.is_empty() {
+        // Not a failure: these downloaded correctly.
+        out.push((
+            false,
+            format!(
+                "{} file(s) downloaded fine but use H.265/HEVC:",
+                leave.len()
+            ),
+        ));
+        for (path, issue) in &leave {
+            out.push((
+                false,
+                format!("    - {} ({})", path.display(), issue.description()),
+            ));
+        }
+        out.push((
+            false,
+            "    ↳ complete downloads — leave them. Play them with VLC, or convert with \
+             ffmpeg -i <file> -c:v libx264 -crf 20 <out>"
+                .to_string(),
+        ));
+    }
+
+    if !unknown.is_empty() {
+        out.push((
+            true,
+            format!("{} file(s) could not be read:", unknown.len()),
+        ));
+        for (path, issue) in &unknown {
+            out.push((
+                true,
+                format!("    - {} ({})", path.display(), issue.description()),
+            ));
+        }
+        out.push((
+            true,
+            "    ↳ completeness is unknown — check permissions and free disk space, \
+             then re-run"
+                .to_string(),
+        ));
+    }
+    out
 }
 
 /// Format per-job outcome summary lines (shared TTY/non-TTY).
@@ -1410,6 +1527,99 @@ pub(super) fn prompt_quick_scrape() {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod integrity_report_tests {
+    use super::integrity_report_lines;
+    use crate::application::integrity::IntegrityIssue;
+    use std::path::PathBuf;
+
+    fn entry(name: &str, issue: IntegrityIssue) -> (PathBuf, IntegrityIssue) {
+        (PathBuf::from(name), issue)
+    }
+
+    fn text(lines: &[(bool, String)]) -> String {
+        lines
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn nothing_to_say_returns_no_lines() {
+        assert!(integrity_report_lines(5, &[]).is_empty());
+    }
+
+    /// The regression that motivated this: a complete HEVC download must not
+    /// be listed among files to delete, and must not carry delete advice.
+    #[test]
+    fn hevc_never_gets_delete_advice() {
+        let out = integrity_report_lines(1, &[entry("clip.mp4", IntegrityIssue::HevcCodec)]);
+        let joined = text(&out);
+        assert!(
+            !joined.contains("delete"),
+            "complete HEVC file must not be told to delete itself:\n{joined}"
+        );
+        assert!(
+            joined.contains("complete"),
+            "must say the download is fine:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn truncated_files_do_get_delete_advice() {
+        let out = integrity_report_lines(
+            3,
+            &[
+                entry("a.part", IntegrityIssue::PartialFile),
+                entry("b.mp4", IntegrityIssue::MissingMoov),
+                entry("c.mp4", IntegrityIssue::Empty),
+            ],
+        );
+        let joined = text(&out);
+        assert!(joined.contains("delete"), "{joined}");
+        assert!(joined.contains("a.part") && joined.contains("b.mp4"));
+    }
+
+    #[test]
+    fn unreadable_files_get_their_own_advice() {
+        let out = integrity_report_lines(1, &[entry("locked.mp4", IntegrityIssue::Unreadable)]);
+        let joined = text(&out);
+        assert!(joined.contains("could not be read"), "{joined}");
+        assert!(
+            joined.contains("unknown"),
+            "must say completeness is unknown:\n{joined}"
+        );
+        assert!(
+            !joined.contains("delete"),
+            "an unreadable file is not a reason to delete:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn mixed_run_prints_all_three_groups_separately() {
+        let out = integrity_report_lines(
+            4,
+            &[
+                entry("cut.mp4", IntegrityIssue::MissingMoov),
+                entry("hevc.mp4", IntegrityIssue::HevcCodec),
+                entry("locked.mp4", IntegrityIssue::Unreadable),
+            ],
+        );
+        let joined = text(&out);
+        assert!(joined.contains("look incomplete"), "{joined}");
+        assert!(joined.contains("H.265/HEVC"), "{joined}");
+        assert!(joined.contains("could not be read"), "{joined}");
+        // The delete advice must be attached to the incomplete list only.
+        let delete_line = out
+            .iter()
+            .find(|(_, t)| t.contains("delete the file(s)"))
+            .map(|(e, _)| *e);
+        assert_eq!(delete_line, Some(true), "delete advice goes to stderr");
     }
 }
 
