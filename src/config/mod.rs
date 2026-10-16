@@ -101,8 +101,13 @@ pub fn load() -> anyhow::Result<Config> {
 
 fn load_inner() -> anyhow::Result<Config> {
     // One-time migration: inline [sites]/[presets]/[profiles] → separate files.
-    // Idempotent and cheap (early return if no inline tables).
-    let _ = migrations::migrate_inline_config_to_files();
+    // Idempotent and cheap (early return if no inline tables). Not fatal: a
+    // failure here must not stop scrapmf from running with the rest of the
+    // config, but it was previously dropped entirely, so it never even reached
+    // the startup warn that would have said what went wrong.
+    if let Err(e) = migrations::migrate_inline_config_to_files() {
+        tracing::warn!(error = %e, "inline config migration failed — continuing without it");
+    }
     let Some(path) = config_path() else {
         return Ok(Config::default());
     };

@@ -311,23 +311,63 @@ fn run_scrape(
 }
 
 /// Print the post-scrape integrity summary (truncated media, .part leftovers).
-fn report_integrity(checked: usize, issues: &[(std::path::PathBuf, &'static str)]) {
+///
+/// Three separate lists, because the remedy differs. An HEVC video is a
+/// complete download that this toolchain will not play — telling the user to
+/// delete it and re-run only destroys a good file and re-downloads identical
+/// bytes. A file we could not read is a third case again: we know nothing
+/// about it, so neither "delete" nor "you're fine" is true.
+fn report_integrity(
+    checked: usize,
+    issues: &[(
+        std::path::PathBuf,
+        crate::application::integrity::IntegrityIssue,
+    )],
+) {
     if issues.is_empty() {
         if checked > 0 {
             tracing::debug!(checked = checked, "integrity check: all files OK");
         }
         return;
     }
-    crate::output::print_error(&format!(
-        "{} downloaded file(s) look incomplete:",
-        issues.len()
-    ));
-    for (path, desc) in issues {
-        println!("  - {} ({desc})", path.display());
+    let (delete, leave, unknown) = crate::application::integrity::partition_by_remedy(issues);
+
+    if !delete.is_empty() {
+        crate::output::print_error(&format!(
+            "{} downloaded file(s) look incomplete:",
+            delete.len()
+        ));
+        for (path, issue) in &delete {
+            println!("  - {} ({})", path.display(), issue.description());
+        }
+        crate::output::print_note(
+            "delete the file(s) above and re-run — deterministic filenames re-download only what is missing",
+        );
     }
-    crate::output::print_note(
-        "delete the file(s) above and re-run — deterministic filenames re-download only what is missing",
-    );
+
+    if !leave.is_empty() {
+        // Info, not error: nothing is wrong with these files.
+        crate::output::print_info(&format!(
+            "{} file(s) downloaded fine but use an uncommon codec:",
+            leave.len()
+        ));
+        for (path, issue) in &leave {
+            println!("  - {} ({})", path.display(), issue.description());
+        }
+        crate::output::print_note(
+            "these are complete downloads — leave them as they are. To play H.265/HEVC, use VLC, or re-encode with: ffmpeg -i <file> -c:v libx264 -crf 20 <out>",
+        );
+    }
+
+    if !unknown.is_empty() {
+        crate::output::print_error(&format!("{} file(s) could not be read:", unknown.len()));
+        for (path, issue) in &unknown {
+            println!("  - {} ({})", path.display(), issue.description());
+        }
+        crate::output::print_note(
+            "these were reported as downloaded but could not be inspected, so completeness is unknown. Check the file permissions and free disk space, then re-run to confirm.",
+        );
+    }
 }
 
 #[cfg(test)]

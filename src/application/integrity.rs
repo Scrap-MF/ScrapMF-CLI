@@ -10,7 +10,12 @@ use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
 /// What kind of integrity problem a file has (if any).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The variants deliberately separate "this download is broken, get rid of it"
+/// from "this download is fine and the toolchain is the limitation". The
+/// report used to print one list and one remedy for all of them, which told
+/// users to delete complete HEVC videos.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegrityIssue {
     /// `*.part` leftover — download was interrupted.
     PartialFile,
@@ -21,6 +26,38 @@ pub enum IntegrityIssue {
     /// Video track uses HEVC/H.265 — complete file, but many players
     /// (and stripped ffmpeg builds) cannot decode it.
     HevcCodec,
+    /// The file was reported as downloaded but could not be read: permissions,
+    /// a filesystem error, or an EIO mid-read. Nothing is known about whether
+    /// the download itself is intact, so it must not be reported as truncated.
+    Unreadable,
+}
+
+/// What the user should do about an [`IntegrityIssue`].
+///
+/// The remedy is the part that was wrong before: `HevcCodec` used to inherit
+/// "delete the file and re-run" from the same bucket as `MissingMoov`, which
+/// means deleting a complete download and re-fetching identical bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remedy {
+    /// Incomplete or corrupt — deleting and re-running is the fix.
+    Delete,
+    /// Complete, but this tool will not play it. Leave it alone.
+    LeaveIt,
+    /// Cannot tell — the file could not be inspected at all.
+    Unknown,
+}
+
+impl IntegrityIssue {
+    /// The action that actually helps for this issue.
+    pub fn remedy(&self) -> Remedy {
+        match self {
+            IntegrityIssue::PartialFile | IntegrityIssue::Empty | IntegrityIssue::MissingMoov => {
+                Remedy::Delete
+            }
+            IntegrityIssue::HevcCodec => Remedy::LeaveIt,
+            IntegrityIssue::Unreadable => Remedy::Unknown,
+        }
+    }
 }
 
 impl IntegrityIssue {
@@ -32,6 +69,7 @@ impl IntegrityIssue {
             IntegrityIssue::HevcCodec => {
                 "video is H.265/HEVC — complete but your player may not support it"
             }
+            IntegrityIssue::Unreadable => "could not be read — completeness unknown",
         }
     }
 }
@@ -192,11 +230,31 @@ fn extension_is(path: &Path, exts: &[&str]) -> bool {
 }
 
 /// Check one downloaded media file for signs of incompleteness.
+///
+/// A read failure is reported as [`IntegrityIssue::Unreadable`] rather than
+/// folded into `MissingMoov`: a file whose bytes cannot be inspected tells us
+/// nothing about whether it is truncated, and the remedy for the two is not the
+/// same — one is "re-download", the other is "check permissions".
 pub fn check_file(path: &Path) -> Option<IntegrityIssue> {
     if path.to_string_lossy().ends_with(".part") {
         return Some(IntegrityIssue::PartialFile);
     }
-    let md = std::fs::metadata(path).ok()?;
+    let md = match std::fs::metadata(path) {
+        Ok(md) => md,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Not necessarily a missing download: the lines this is fed come
+            // from gallery-dl's stdout, so some are not paths at all. Keep the
+            // old behaviour of staying quiet rather than reporting a phantom.
+            return None;
+        }
+        Err(_) => {
+            // The path exists but cannot be inspected — permissions, a failing
+            // filesystem, EIO. We learn nothing about whether the download is
+            // intact, and the remedies for "truncated" and "cannot read" are
+            // different.
+            return Some(IntegrityIssue::Unreadable);
+        }
+    };
     if md.len() == 0 {
         return Some(IntegrityIssue::Empty);
     }
@@ -209,8 +267,10 @@ pub fn check_file(path: &Path) -> Option<IntegrityIssue> {
     // MP4 family: playable files contain a `moov` box. Search by stream in
     // chunks with a 4-byte overlap so an atom name split across chunk
     // boundaries is still found.
-    if !contains_moov(path) {
-        return Some(IntegrityIssue::MissingMoov);
+    match contains_moov(path) {
+        MoovScan::Found => {}
+        MoovScan::Absent => return Some(IntegrityIssue::MissingMoov),
+        MoovScan::Unreadable => return Some(IntegrityIssue::Unreadable),
     }
     // Structurally complete — flag HEVC video (complete but often undecodable).
     if let Some(info) = probe_mp4(path)
@@ -252,23 +312,33 @@ pub fn quality_summary(reported_paths: &[String]) -> Option<String> {
     Some(format!("quality: {}", parts.join(", ")))
 }
 
+/// Outcome of scanning a file for the `moov` atom.
+enum MoovScan {
+    Found,
+    /// Scanned the whole file and it is not there.
+    Absent,
+    /// Could not scan — open or read failed. Distinct from `Absent`, because
+    /// the two call for opposite advice.
+    Unreadable,
+}
+
 /// Streamed search for the byte pattern `moov` inside a file — zero-alloc.
-fn contains_moov(path: &Path) -> bool {
+fn contains_moov(path: &Path) -> MoovScan {
     use std::sync::OnceLock;
     static FINDER: OnceLock<memchr::memmem::Finder> = OnceLock::new();
     let finder = FINDER.get_or_init(|| memchr::memmem::Finder::new(b"moov"));
     const CHUNK: usize = 64 * 1024;
     let Ok(mut f) = std::fs::File::open(path) else {
-        return false;
+        return MoovScan::Unreadable;
     };
     let mut buf = [0u8; CHUNK];
     let mut tail = [0u8; 3];
     let mut tail_len: usize = 0;
     loop {
         let n = match f.read(&mut buf) {
-            Ok(0) => return false,
+            Ok(0) => return MoovScan::Absent,
             Ok(n) => n,
-            Err(_) => return false,
+            Err(_) => return MoovScan::Unreadable,
         };
         // Check boundary crossing (tail + buf prefix) without large alloc
         if tail_len > 0 {
@@ -277,11 +347,11 @@ fn contains_moov(path: &Path) -> bool {
             let take = n.min(3);
             boundary[tail_len..tail_len + take].copy_from_slice(&buf[..take]);
             if finder.find(&boundary[..tail_len + take]).is_some() {
-                return true;
+                return MoovScan::Found;
             }
         }
         if finder.find(&buf[..n]).is_some() {
-            return true;
+            return MoovScan::Found;
         }
         // Keep last 3 bytes for next iteration
         if n >= 3 {
@@ -330,12 +400,14 @@ pub fn scan_partials(dir: &Path) -> Vec<PathBuf> {
 /// Lines starting with `#` (gallery-dl's "skipped/already have" marker) are
 /// ignored so pre-existing files are never re-read needlessly.
 ///
-/// Returns `(checked, issues)` where issues maps path → problem description.
+/// Returns `(checked, issues)`. The issue is returned rather than its
+/// description string so callers can group by [`IntegrityIssue::remedy`] and
+/// give each group the advice that actually applies.
 pub fn verify_run(
     reported_paths: &[String],
     output_dir: Option<&Path>,
-) -> (usize, Vec<(PathBuf, &'static str)>) {
-    let mut issues: Vec<(PathBuf, &'static str)> = Vec::new();
+) -> (usize, Vec<(PathBuf, IntegrityIssue)>) {
+    let mut issues: Vec<(PathBuf, IntegrityIssue)> = Vec::new();
     let mut checked = 0usize;
 
     for line in reported_paths {
@@ -346,26 +418,53 @@ pub fn verify_run(
         let path = Path::new(line);
         checked += 1;
         if let Some(issue) = check_file(path) {
-            issues.push((path.to_path_buf(), issue.description()));
+            issues.push((path.to_path_buf(), issue));
         }
     }
 
     if let Some(dir) = output_dir {
         for part in scan_partials(dir) {
             if !issues.iter().any(|(p, _)| *p == part) {
-                issues.push((part, IntegrityIssue::PartialFile.description()));
+                issues.push((part, IntegrityIssue::PartialFile));
             }
         }
     }
-    issues.sort();
+    // By path only: the issue is diagnostic data, not part of the ordering.
+    issues.sort_by(|a, b| a.0.cmp(&b.0));
     (checked, issues)
+}
+
+/// One file flagged during the post-run check, with the reason.
+pub type IssueEntry = (PathBuf, IntegrityIssue);
+
+/// Split a run's issues into the three advice buckets.
+///
+/// Returned as `(delete, leave, unreadable)` so a caller can print one list
+/// per remedy instead of one list and one blanket instruction.
+pub fn partition_by_remedy(
+    issues: &[IssueEntry],
+) -> (Vec<IssueEntry>, Vec<IssueEntry>, Vec<IssueEntry>) {
+    let mut delete = Vec::new();
+    let mut leave = Vec::new();
+    let mut unknown = Vec::new();
+    for (path, issue) in issues {
+        match issue.remedy() {
+            Remedy::Delete => delete.push((path.clone(), *issue)),
+            Remedy::LeaveIt => leave.push((path.clone(), *issue)),
+            Remedy::Unknown => unknown.push((path.clone(), *issue)),
+        }
+    }
+    (delete, leave, unknown)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{IntegrityIssue, check_file, scan_partials, verify_run};
+    use super::{
+        IntegrityIssue, Remedy, check_file, partition_by_remedy, scan_partials, verify_run,
+    };
     use std::io::Write;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     #[test]
@@ -417,6 +516,68 @@ mod tests {
     fn missing_file_returns_none_not_error() {
         let dir = TempDir::new().expect("tempdir");
         assert_eq!(check_file(&dir.path().join("ghost.mp4")), None);
+    }
+
+    /// A file that exists but cannot be inspected is neither "truncated" nor
+    /// "fine" — the old code reported it as `MissingMoov`, which told the user
+    /// to delete a file that might be perfectly intact.
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_file_is_not_reported_as_truncated() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().expect("tempdir");
+        let p = dir.path().join("locked.mp4");
+        // A well-formed MP4 payload: the only thing wrong is readability, so
+        // any "truncated" verdict here would be a false alarm.
+        let mut f = std::fs::File::create(&p).expect("create");
+        f.write_all(b"\x00\x00\x00\x18ftypmp42moov").expect("seed");
+        drop(f);
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).expect("lock");
+
+        let got = check_file(&p);
+        // Restore before asserting so the TempDir can clean itself up.
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).expect("unlock");
+
+        if got.is_none() {
+            // Running as root, or a filesystem that ignores the mode bits:
+            // there is no unreadable file to observe, so nothing to prove.
+            eprintln!("skipping: this process can read a 0o000 file");
+            return;
+        }
+        assert_eq!(got, Some(IntegrityIssue::Unreadable));
+    }
+
+    /// The grouping the report is built on: only genuinely broken downloads
+    /// get told to delete and re-run.
+    #[test]
+    fn remedy_separates_deletable_from_complete() {
+        assert_eq!(IntegrityIssue::PartialFile.remedy(), Remedy::Delete);
+        assert_eq!(IntegrityIssue::Empty.remedy(), Remedy::Delete);
+        assert_eq!(IntegrityIssue::MissingMoov.remedy(), Remedy::Delete);
+
+        // The regression: a complete HEVC video must never inherit
+        // "delete the file and re-run".
+        assert_eq!(IntegrityIssue::HevcCodec.remedy(), Remedy::LeaveIt);
+        assert_eq!(IntegrityIssue::Unreadable.remedy(), Remedy::Unknown);
+    }
+
+    #[test]
+    fn partition_by_remedy_splits_the_three_groups() {
+        let issues = vec![
+            (PathBuf::from("a.part"), IntegrityIssue::PartialFile),
+            (PathBuf::from("b.mp4"), IntegrityIssue::MissingMoov),
+            (PathBuf::from("c.mp4"), IntegrityIssue::HevcCodec),
+            (PathBuf::from("d.mp4"), IntegrityIssue::Unreadable),
+        ];
+        let (delete, leave, unknown) = partition_by_remedy(&issues);
+
+        let names = |v: &Vec<(PathBuf, IntegrityIssue)>| -> Vec<String> {
+            v.iter().map(|(p, _)| p.display().to_string()).collect()
+        };
+        assert_eq!(names(&delete), vec!["a.part", "b.mp4"]);
+        assert_eq!(names(&leave), vec!["c.mp4"]);
+        assert_eq!(names(&unknown), vec!["d.mp4"]);
     }
 
     #[test]
@@ -473,11 +634,15 @@ mod tests {
         );
         assert_eq!(checked, 2); // cut + good; "# skipped" ignored
         assert_eq!(issues.len(), 2, "issues: {issues:?}"); // cut.mp4 + sub.part
-        assert!(issues.iter().any(|(p, d)| p == &cut && d.contains("moov")));
         assert!(
             issues
                 .iter()
-                .any(|(p, d)| *p == part && d.contains(".part"))
+                .any(|(p, i)| p == &cut && *i == IntegrityIssue::MissingMoov)
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|(p, i)| *p == part && *i == IntegrityIssue::PartialFile)
         );
     }
 

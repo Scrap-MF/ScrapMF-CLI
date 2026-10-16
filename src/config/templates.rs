@@ -7,6 +7,33 @@ use super::fs::write_config_file;
 use super::migrations::{migrate_highlights_if_needed, migrate_tiktok_robustness};
 use super::{Profile, RateLimit, Site, Task, sites_dir};
 
+/// Serialize a site and prove the result is usable before it reaches disk.
+///
+/// A builder bug used to be invisible: it wrote a file that did not parse, and
+/// the next migration run could not read it, could not repair it, and left the
+/// user with a site config that silently did nothing. Nothing is kept to
+/// recover from either — `write_atomic` renames over the original.
+///
+/// So the exact bytes that would be written are parsed back here, and the
+/// result must still carry an identity. `toml::from_str` ignores comments, so
+/// this validates the header text too. A failure aborts before any write.
+fn render_site(site: &Site, header: &str, label: &str) -> anyhow::Result<String> {
+    let body =
+        toml::to_string_pretty(site).with_context(|| format!("serialize {label} site template"))?;
+    let content = format!("{header}{body}\n");
+
+    let parsed: Site = toml::from_str(&content).with_context(|| {
+        format!("generated {label}.toml does not parse back — refusing to write it")
+    })?;
+    if parsed.site.is_none() && parsed.pattern.is_none() && parsed.extractor.is_empty() {
+        anyhow::bail!(
+            "generated {label}.toml has no identity (site/pattern/extractor all absent) \
+             — refusing to write it"
+        );
+    }
+    Ok(content)
+}
+
 pub(crate) fn tiktok_posts_conditional_directory() -> toml::Value {
     let seg = |s: &str| toml::Value::String(s.to_string());
     let dir = |last: &str| {
@@ -34,7 +61,11 @@ pub fn ensure_example_sites() -> anyhow::Result<()> {
     let target = dir.join("instagram.toml");
     if target.exists() {
         // Migrate existing instagram.toml to new highlights rule (no date, highlight_id, media_id only)
-        let _ = migrate_highlights_if_needed(&target);
+        // Not fatal: the file is still valid, it just keeps its old shape.
+        // Dropped silently before, which hid a migration that never ran.
+        if let Err(e) = migrate_highlights_if_needed(&target) {
+            tracing::warn!(path = %target.display(), error = %e, "highlights migration failed — file left as-is");
+        }
         return Ok(());
     }
     let mut extractor = std::collections::HashMap::new();
@@ -159,7 +190,6 @@ pub fn ensure_example_sites() -> anyhow::Result<()> {
             "{subcategory}".to_string(),
         ]),
     };
-    let body = toml::to_string_pretty(&site).context("serialize instagram site")?;
     let header = r#"# scrapmf — site config (1 file per site)
 # File: ~/.config/scrapmf/sites/<name>.toml (0o600, dir 0o700)
 # Auto-matched when URL contains `pattern`. CLI --preset can also force it.
@@ -222,7 +252,7 @@ pub fn ensure_example_sites() -> anyhow::Result<()> {
 #
 
 "#;
-    let content = format!("{header}{body}");
+    let content = render_site(&site, header, "instagram")?;
     write_config_file(&target, &content)
 }
 
@@ -336,7 +366,6 @@ pub fn ensure_tiktok_site() -> anyhow::Result<()> {
         filename_template: None,
         directory_template: None,
     };
-    let body = toml::to_string_pretty(&site).context("serialize tiktok site")?;
     let header = r#"# scrapmf — site config — tiktok
 # File: ~/.config/scrapmf/sites/tiktok.toml (0o600, dir 0o700)
 #
@@ -384,7 +413,7 @@ pub fn ensure_tiktok_site() -> anyhow::Result<()> {
 #
 
 "#;
-    let content = format!("{header}{body}");
+    let content = render_site(&site, header, "tiktok")?;
     write_config_file(&target, &content)
 }
 
@@ -478,7 +507,6 @@ pub fn ensure_twitter_site() -> anyhow::Result<()> {
         filename_template: None,
         directory_template: None,
     };
-    let body = toml::to_string_pretty(&site).context("serialize twitter site")?;
     let header = r#"# scrapmf — site config — twitter / X
 # File: ~/.config/scrapmf/sites/twitter.toml (0o600, dir 0o700)
 #
@@ -498,7 +526,7 @@ pub fn ensure_twitter_site() -> anyhow::Result<()> {
 #     usable in filenames/filters if ever needed.
 #
 "#;
-    let content = format!("{header}{body}");
+    let content = render_site(&site, header, "twitter")?;
     write_config_file(&target, &content)
 }
 
@@ -527,7 +555,10 @@ pub fn ensure_vsco_site() -> anyhow::Result<()> {
         {
             let fixed = existing.replace("{id}_{date:%Y-%m-%d}", "{date:%Y-%m-%d}_{id}");
             if fixed != existing {
-                let _ = write_config_file(&target, &fixed);
+                // Propagate: a rename swap that silently fails leaves the file
+                // on the old filename template, and downloads land in a
+                // different tree than the one already populated.
+                write_config_file(&target, &fixed)?;
             }
         }
         return Ok(());
@@ -588,7 +619,6 @@ pub fn ensure_vsco_site() -> anyhow::Result<()> {
         filename_template: None,
         directory_template: None,
     };
-    let body = toml::to_string_pretty(&site).context("serialize vsco site")?;
     let header = r#"# scrapmf — site config — vsco
 # File: ~/.config/scrapmf/sites/vsco.toml (0o600, dir 0o700)
 #
@@ -605,7 +635,7 @@ pub fn ensure_vsco_site() -> anyhow::Result<()> {
 #   INFO: collection/spaces/image/video extractors exist but are out of scope v1.
 #
 "#;
-    let content = format!("{header}{body}");
+    let content = render_site(&site, header, "vsco")?;
     write_config_file(&target, &content)
 }
 
@@ -651,7 +681,6 @@ pub fn ensure_threads_site() -> anyhow::Result<()> {
             "{subcategory}".to_string(),
         ]),
     };
-    let body = toml::to_string_pretty(&site).context("serialize threads site")?;
     let header = r#"# scrapmf — site config — threads (via threadstractor)
 # File: ~/.config/scrapmf/sites/threads.toml (0o600, dir 0o700)
 # Gallery-dl has no Threads support — scrapmf routes Threads URLs to the
@@ -671,7 +700,7 @@ pub fn ensure_threads_site() -> anyhow::Result<()> {
 #   Archive: deferred — threads archive JSONL not yet implemented (re-run skips via filename dedup for now).
 #
 "#;
-    let content = format!("{header}{body}");
+    let content = render_site(&site, header, "threads")?;
     write_config_file(&target, &content)
 }
 
@@ -861,7 +890,6 @@ pub fn ensure_facebook_site() -> anyhow::Result<()> {
         filename_template: None,
         directory_template: None,
     };
-    let body = toml::to_string_pretty(&site).context("serialize facebook site")?;
     let header = r#"# scrapmf — site config — facebook
 # File: ~/.config/scrapmf/sites/facebook.toml (0o600, dir 0o700)
 # Gallery-dl 1.32.16 (unchanged from 1.32.9): facebook:user dispatches photos/albums/avatar/info; set/video handle albums/videos.
@@ -872,7 +900,7 @@ pub fn ensure_facebook_site() -> anyhow::Result<()> {
 #   Videos → videos/ {date}_{id}.{ext}
 #   Profile → profile/ {username}_{id}.{ext}
 "#;
-    let content = format!("{header}{body}");
+    let content = render_site(&site, header, "facebook")?;
     write_config_file(&target, &content)
 }
 
@@ -908,6 +936,56 @@ pub fn write_profile_file(path: &Path, profile: &Profile) -> anyhow::Result<()> 
     );
     let content = format!("{header}{body}\n");
     write_config_file(path, &content)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod render_site_tests {
+    use super::*;
+
+    #[test]
+    fn rejects_a_site_with_no_identity() {
+        // Serializes fine, parses fine — but rebuilds into nothing usable.
+        let empty = Site::default();
+        let err = render_site(&empty, "# header\n", "instagram")
+            .expect_err("an identity-less site must not be written");
+        assert!(
+            format!("{err:#}").contains("no identity"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn keeps_the_header_and_round_trips() {
+        let site = Site {
+            site: Some("instagram".into()),
+            pattern: Some("instagram.com".into()),
+            ..Default::default()
+        };
+        let header = "# a comment\n# another comment\n";
+        let content = render_site(&site, header, "instagram").expect("renders");
+
+        assert!(content.starts_with(header), "header must survive");
+        let back: Site = toml::from_str(&content).expect("parses");
+        assert_eq!(back.site.as_deref(), Some("instagram"));
+        assert_eq!(back.pattern.as_deref(), Some("instagram.com"));
+    }
+
+    /// A header that breaks the TOML — unterminated string, stray bracket —
+    /// would otherwise be written and make the whole file unreadable.
+    #[test]
+    fn rejects_a_header_that_breaks_the_toml() {
+        let site = Site {
+            site: Some("instagram".into()),
+            ..Default::default()
+        };
+        let err = render_site(&site, "# ok\n[unclosed\n", "instagram")
+            .expect_err("a broken header must not be written");
+        assert!(
+            format!("{err:#}").contains("does not parse back"),
+            "unexpected error: {err:#}"
+        );
+    }
 }
 
 #[cfg(test)]

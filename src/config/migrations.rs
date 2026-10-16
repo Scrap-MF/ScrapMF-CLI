@@ -7,6 +7,43 @@ use super::fs::write_config_file;
 use super::templates::tiktok_posts_conditional_directory;
 use super::{RateLimit, Site, sites_dir};
 
+/// Parse a site file, or `None` when it cannot be parsed or carries no identity.
+///
+/// Every migration that rewrites `sites/*.toml` MUST go through this before
+/// touching the file. A migration that rebuilds from a failed parse produces a
+/// `Site::default()`, and writing that over the user's file silently destroys
+/// every setting in it — `write_atomic` renames, so there is no partial write
+/// and no copy of the original left behind.
+///
+/// "No identity" means `site`, `pattern` and `extractor` are all absent: such a
+/// file is empty or corrupt, and a default parse of it looks deceptively valid.
+///
+/// `label` identifies the caller in the warning, so the log says which
+/// migration declined the file rather than a bare parse error.
+fn parse_site(path: &Path, raw: &str, label: &'static str) -> Option<Site> {
+    let site: Site = match toml::from_str(raw) {
+        Ok(site) => site,
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                label,
+                "site unparseable — skipping migration (rebuild from a failed parse would erase this file's settings)"
+            );
+            return None;
+        }
+    };
+    if site.site.is_none() && site.pattern.is_none() && site.extractor.is_empty() {
+        tracing::warn!(
+            path = %path.display(),
+            label,
+            "site has no identity (site/pattern/extractor all absent) — skipping migration"
+        );
+        return None;
+    }
+    Some(site)
+}
+
 pub(super) fn migrate_highlights_if_needed(path: &Path) -> anyhow::Result<bool> {
     let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     // SAFETY: never rewrite empty/corrupt files — an empty parse yields a
@@ -14,20 +51,28 @@ pub(super) fn migrate_highlights_if_needed(path: &Path) -> anyhow::Result<bool> 
     if raw.trim().is_empty() {
         return Ok(false);
     }
+    // Parse once, here. A file that will not parse is never rewritten: the old
+    // code fell back to a raw-text heuristic in that case, and then rebuilt
+    // from `toml::from_str(&raw).unwrap_or_default()` — the same parser on the
+    // same input, so that parse failed too and the user's file was overwritten
+    // with an empty Site. The heuristic branch had no success case at all.
+    let Some(mut site) = parse_site(path, &raw, "highlights") else {
+        return Ok(false);
+    };
     // Determine needs via parsed extractor table only (raw global templates like {post_id}_{date} are for posts/reels, not highlights)
     let mut needs = false;
-    #[allow(unused_assignments)]
-    let mut has_highlights = raw.contains("instagram:highlights");
-    if let Ok(site) = toml::from_str::<Site>(&raw) {
+    // Assigned once the site is confirmed to be an instagram site; declared
+    // without a value because the old raw-text seed was only ever read on the
+    // parse-failure path, which no longer exists.
+    let has_highlights;
+    {
         // This migration ONLY applies to instagram sites — never touch other sites.
-        // A file without any identity (site/pattern/extractor keys) is corrupt — skip.
-        let is_instagram = (site.site.as_deref() == Some("instagram")
+        let is_instagram = site.site.as_deref() == Some("instagram")
             || site
                 .pattern
                 .as_ref()
                 .is_some_and(|p| p.contains("instagram"))
-            || site.extractor.keys().any(|k| k.starts_with("instagram")))
-            && !(site.site.is_none() && site.pattern.is_none() && site.extractor.is_empty());
+            || site.extractor.keys().any(|k| k.starts_with("instagram"));
         if !is_instagram {
             return Ok(false);
         }
@@ -174,26 +219,15 @@ pub(super) fn migrate_highlights_if_needed(path: &Path) -> anyhow::Result<bool> 
                 needs = true;
             }
         }
-    } else {
-        // If parse fails, fallback to raw heuristic but only for highlights section.
-        // NEVER rebuild from a failed parse (would wipe user config with defaults).
-        if raw.contains("instagram:highlights") {
-            if raw.contains("{media_id}_{date") || raw.contains("{media_id}_{date:%Y") {
-                needs = true;
-            }
-        } else {
-            // Unparseable and no instagram markers — corrupt/unknown file, leave it alone
-            return Ok(false);
-        }
     }
     if !needs {
         return Ok(false);
     }
     tracing::warn!(path = %path.display(), "migrating instagram highlights to new rule (no date, highlight_id, media_id only)");
 
-    // Parse and rebuild with corrected highlights table, preserving other fields
-    // Use post_id as highlight_id (gallery-dl keyword for highlights is post_id)
-    let mut site: Site = toml::from_str(&raw).unwrap_or_default();
+    // `site` was parsed successfully above and is still in scope, so the
+    // migration rebuilds from it directly. No second parse, and therefore no
+    // way for that parse to fail and hand back a default-constructed Site.
     let mut highlight_table = toml::map::Map::new();
     highlight_table.insert(
         "include".to_string(),
@@ -335,14 +369,9 @@ pub(super) fn migrate_site_root_order(path: &Path) -> anyhow::Result<bool> {
     if raw.trim().is_empty() {
         return Ok(false);
     }
-    let Ok(mut site) = toml::from_str::<Site>(&raw) else {
+    let Some(mut site) = parse_site(path, &raw, "site-root-order") else {
         return Ok(false);
     };
-    // A file with no identity at all (site + pattern + extractor all absent)
-    // is corrupt — leave it alone.
-    if site.site.is_none() && site.pattern.is_none() && site.extractor.is_empty() {
-        return Ok(false);
-    }
     // Instagram has its own dedicated migration — skip here.
     let is_instagram = site.site.as_deref() == Some("instagram")
         || site
@@ -483,16 +512,8 @@ pub fn migrate_filename_date_first(path: &Path) -> anyhow::Result<bool> {
     if !raw.contains(IG_OLD) && !raw.contains(TT_OLD) {
         return Ok(false);
     }
-    let mut site: Site = match toml::from_str(&raw) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "site unparseable — skipping date-first filename migration"
-            );
-            return Ok(false);
-        }
+    let Some(mut site) = parse_site(path, &raw, "date-first-filename") else {
+        return Ok(false);
     };
 
     let is_instagram = site.site.as_deref() == Some("instagram")
@@ -591,21 +612,14 @@ pub fn migrate_all_sites_highlights() -> anyhow::Result<usize> {
 /// Migrate an existing `sites/tiktok.toml`.
 ///
 /// Injects download-robustness flags (`--retries 10`, `--http-timeout 120`)
-/// into `extra_args` when missing. Rewrites the file atomically with a
-/// pre-write backup; comments in the original file are regenerated from the
+/// into `extra_args` when missing. A file that does not parse is left alone:
+/// rewriting it from defaults would erase the user's settings and nothing is
+/// kept to recover from. Comments in the original file are regenerated from the
 /// standard header (same policy as other site migrations).
 pub(super) fn migrate_tiktok_robustness(path: &Path) -> anyhow::Result<()> {
     let raw = std::fs::read_to_string(path)?;
-    let mut site: Site = match toml::from_str(&raw) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "tiktok.toml unparseable — skipping robustness migration"
-            );
-            return Ok(());
-        }
+    let Some(mut site) = parse_site(path, &raw, "tiktok-robustness") else {
+        return Ok(());
     };
 
     const ROBUSTNESS_ARGS: &[&str] = &["--retries", "10", "--http-timeout", "120"];
@@ -813,6 +827,7 @@ pub fn migrate_legacy_placeholders() -> anyhow::Result<usize> {
 mod legacy_migration_tests {
     use super::migrate_filename_date_first;
     use super::migrate_highlights_if_needed;
+    use super::parse_site;
     use crate::config::migrate_one;
     use std::path::Path;
     use tempfile::TempDir;
@@ -972,6 +987,108 @@ filename = "{{media_id}}.{{extension}}"
         assert_migrates_to_canonical(&path, "retired slugified form");
         let migrated = std::fs::read_to_string(&path).expect("read back");
         assert!(!migrated.contains("!g"), "!g conversion must be gone");
+    }
+
+    // ── Data-loss regressions ──────────────────────────────────────────────
+    //
+    // Every test below asserts the same invariant: a file this migration
+    // cannot parse is left byte-for-byte alone. The file it used to destroy is
+    // the one this migration was supposed to fix.
+
+    /// The exact shape that erased user config: a site file that fails to
+    /// parse AND carries the marker strings the old raw-text heuristic looked
+    /// for. The heuristic set `needs = true`, and the rebuild then called
+    /// `toml::from_str(&raw).unwrap_or_default()` — same parser, same input,
+    /// so it failed too and returned an empty `Site` that got written over
+    /// everything. `write_atomic` renames, so the original was simply gone.
+    #[test]
+    fn unparseable_site_with_markers_is_untouched() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("instagram.toml");
+        // Valid TOML except `sleep = 3` where RateLimit.sleep is a String.
+        // Contains both marker strings the deleted heuristic searched for.
+        let cfg = r#"site = "instagram"
+
+[rate_limit]
+sleep = 3
+
+[extractor."instagram:highlights"]
+filename = "{media_id}_{date}.{extension}"
+directory = ["{scrapmf_root}", "{category}", "{username}"]
+"#;
+        std::fs::write(&path, cfg).expect("seed");
+        let before = std::fs::read_to_string(&path).expect("reread");
+
+        assert!(
+            !migrate_highlights_if_needed(&path).expect("migration runs"),
+            "an unparseable file must not be reported as migrated"
+        );
+
+        let after = std::fs::read_to_string(&path).expect("read back");
+        assert_eq!(
+            before, after,
+            "unparseable site config was rewritten — user settings destroyed"
+        );
+    }
+
+    /// A bare type error is the realistic way a user breaks their own config by
+    /// hand: `sleep = 3` instead of `sleep = "3"`, or `sleep_429 = "120"`
+    /// instead of a number. No corruption required, only a typo — and serde
+    /// rejects the whole file, not just the field.
+    #[test]
+    fn type_error_in_rate_limit_leaves_file_intact() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("instagram.toml");
+        let cfg = r#"site = "instagram"
+pattern = "instagram.com"
+
+[rate_limit]
+sleep_request = 5
+
+[extractor."instagram:highlights"]
+filename = "{media_id}_{date:%Y-%m-%d}.{extension}"
+"#;
+        std::fs::write(&path, cfg).expect("seed");
+        let before = std::fs::read_to_string(&path).expect("reread");
+
+        let _ = migrate_highlights_if_needed(&path).expect("migration runs");
+
+        assert_eq!(
+            before,
+            std::fs::read_to_string(&path).expect("read back"),
+            "a type error must not cost the user their config"
+        );
+    }
+
+    /// A file that parses but carries no identity would rebuild into a default
+    /// `Site` too. Skipping it is the same rule, one step earlier.
+    #[test]
+    fn identity_less_site_is_untouched() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("instagram.toml");
+        // Parses cleanly; site/pattern/extractor are all absent.
+        let cfg = "extra_args = []\n";
+        std::fs::write(&path, cfg).expect("seed");
+        let before = std::fs::read_to_string(&path).expect("reread");
+
+        let _ = migrate_highlights_if_needed(&path).expect("migration runs");
+
+        assert_eq!(
+            before,
+            std::fs::read_to_string(&path).expect("read back"),
+            "an identity-less file must not be rebuilt into defaults"
+        );
+    }
+
+    /// `parse_site` is the single gate every migration now goes through, so it
+    /// gets the coverage the four inline copies never had.
+    #[test]
+    fn parse_site_rejects_unparseable_and_identity_less() {
+        let path = Path::new("/nonexistent/instagram.toml");
+        assert!(parse_site(path, "sleep = 3", "test").is_none());
+        assert!(parse_site(path, "", "test").is_none());
+        assert!(parse_site(path, "extra_args = []\n", "test").is_none());
+        assert!(parse_site(path, "site = \"instagram\"\n", "test").is_some());
     }
 
     #[test]
